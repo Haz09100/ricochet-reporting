@@ -10,6 +10,11 @@ const duration = (seconds) => {
   const minutes = Math.floor(total / 60);
   return minutes ? `${minutes}m ${Math.floor(total % 60)}s` : `${Math.floor(total)}s`;
 };
+const longDuration = (seconds) => {
+  const total = Math.max(0, Math.floor(Number(seconds || 0)));
+  const hours = Math.floor(total / 3600); const minutes = Math.floor((total % 3600) / 60); const secs = total % 60;
+  return hours ? `${hours}h ${minutes}m ${secs}s` : duration(total);
+};
 const value = (item, ...keys) => keys.map((key) => item?.[key]).find((candidate) => candidate !== undefined && candidate !== null && candidate !== "") ?? "—";
 const fullName = (row) => [row.first_name, row.last_name].filter(Boolean).join(" ") || "Unknown lead";
 
@@ -26,22 +31,30 @@ export function OverviewView({ data }) {
     ["Leads received", totals.leads_received, "Created inside the selected range", "blue"],
     ["Activity cohort", totals.activity_cohort, "Updated or active in range", "blue"],
     ["Worked leads", totals.worked_leads, "Qualifying call or new note", "green"],
+    ["Untouched received", totals.untouched_received, "Received without qualifying work", "gold"],
+    ["Handled calls", totals.handled_calls, "Identified calls of at least 6 seconds", "green"],
     ["Live leads sent", totals.live_leads_sent, "First live status + email sent", "green"],
     ["Live emails sent", totals.live_emails_sent, "Passed note check and sent", "mint"],
     ["Contact rate", `${number(totals.contact_rate, 1)}%`, `${number(totals.contacted_leads)} reached (2.x)`, "green"],
     ["Calls logged", totals.calls_logged, `${number(totals.handled_calls)} handled calls`, "slate"],
     ["Notes added", totals.notes_added, `${number(totals.leads_with_notes)} leads received notes`, "violet"],
+    ["Phone appointments", totals.live_phone_appointments, "Live phone appointment type", "green"],
+    ["In-person appointments", totals.live_in_person_appointments, "Live in-person appointment type", "green"],
+    ["Other appointments", totals.other_live_appointments, "Virtual, unclear, or other", "slate"],
     ["AI reviewed", totals.ai_reviewed, "Reviewed calls in selected range", "gold"],
     ["Average AI score", totals.average_ai_score ? number(totals.average_ai_score, 1) : "—", "Reviewed calls only", "gold"],
+    ["Needs attention", totals.needs_attention, "Status or note mismatch", "gold"],
   ];
   const statuses = data?.status_breakdown || [];
   const max = Math.max(1, ...statuses.map((row) => Number(row.count || 0)));
   return <>
     <div className="hero-row"><div><span className="eyebrow">Daily command center</span><h2>Your lead operation at a glance</h2><p>Live means the lead first received a live/appointment status in range and its email passed the note check and was sent.</p></div></div>
     <div className="metric-grid">{cards.map(([label, amount, note, tone]) => <article className={`metric-card ${tone}`} key={label}><span>{label}</span><strong>{typeof amount === "number" ? number(amount, 1) : amount ?? 0}</strong><small>{note}</small></article>)}</div>
-    <div className="dashboard-grid"><article className="panel wide"><div className="panel-heading"><div><span className="eyebrow">Pipeline</span><h3>Current status mix</h3></div><span className="subtle">{number(statuses.reduce((sum, row) => sum + Number(row.count || 0), 0))} selected</span></div>
-      <div className="status-list">{statuses.slice(0, 10).map((row) => <div className="status-row" key={row.status}><span>{row.status || "Unknown"}</span><div><i style={{ width: `${Math.max(2, Number(row.count || 0) / max * 100)}%` }} /></div><b>{number(row.count)}</b></div>)}</div>
+    <article className="panel pipeline-panel"><div className="panel-heading"><div><span className="eyebrow">Status pipeline</span><h3>Where selected leads ended up</h3></div><span className="subtle">{number(statuses.reduce((sum, row) => sum + Number(row.count || 0), 0))} selected</span></div><div className="pipeline">{statuses.map((row) => <i key={row.status} title={`${row.status}: ${number(row.count)}`} style={{ flex: Math.max(0, Number(row.count || 0)) }} />)}</div><div className="pipeline-legend">{statuses.map((row) => <span key={row.status}>{row.status} <b>{number(row.count)}</b></span>)}</div></article>
+    <div className="dashboard-grid"><article className="panel wide"><div className="panel-heading"><div><span className="eyebrow">Pipeline detail</span><h3>Selected, worked, and calls by status</h3></div></div>
+      <div className="status-list">{statuses.slice(0, 14).map((row) => <div className="status-row detailed" key={row.status}><span>{row.status || "Unknown"}</span><div><i style={{ width: `${Math.max(2, Number(row.count || 0) / max * 100)}%` }} /></div><b>{number(row.count)} selected · {number(row.worked)} worked · {number(row.calls)} calls</b></div>)}</div>
     </article><article className="panel"><div className="panel-heading"><div><span className="eyebrow">Counting rules</span><h3>Trusted definitions</h3></div></div><ul className="definition-list"><li><CheckCircle2 />Received uses created date.</li><li><CheckCircle2 />Worked requires a qualifying call or new note.</li><li><CheckCircle2 />Live excludes old live leads merely called today.</li><li><CheckCircle2 />Inbound types 7 and 10 count only when a recording/transcript exists.</li></ul></article></div>
+    <div className="metric-grid compact-metrics">{[["Converted",totals.converted,"3.x statuses"],["Follow ups",totals.follow_ups,"Status 2.0"],["Not interested",totals.not_interested,"Status 2.1"],["Bad contacts",totals.bad_contacts,"Status 1.4"],["Active callers",totals.active_callers,"Selected range"],["Total call time",longDuration(totals.total_call_seconds),"All matching calls"]].map(([label, amount, note]) => <article className="metric-card mint" key={label}><span>{label}</span><strong>{typeof amount === "number" ? number(amount) : amount}</strong><small>{note}</small></article>)}</div>
   </>;
 }
 
