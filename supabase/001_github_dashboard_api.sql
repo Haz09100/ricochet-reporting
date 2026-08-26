@@ -97,6 +97,27 @@ as $$
   end
 $$;
 
+create or replace function report_api.appointment_type(p_lead reporting.leads)
+returns text
+language sql
+stable
+set search_path = ''
+as $$
+  with source as (
+    select lower(coalesce(nullif(trim(p_lead.note), ''), nullif(trim(p_lead.all_notes), ''), '')) value
+  )
+  select case
+    when value not like '%appointment type%' then 'Not provided'
+    when value like '%appointment type%in person%' or value like '%appointment type%in-person%'
+      or value like '%appointment type%face to face%' or value like '%appointment type%onsite%' then 'In person'
+    when value like '%appointment type%phone call%' or value like '%appointment type%telephone%'
+      or value like '%appointment type%phone appointment%' then 'Phone call'
+    when value like '%appointment type%virtual%' or value like '%appointment type%zoom%'
+      or value like '%appointment type%video call%' or value like '%appointment type%google meet%' then 'Virtual'
+    else 'Other / unclear'
+  end from source
+$$;
+
 create or replace function report_api.lead_matches(p_lead reporting.leads, p_filters jsonb)
 returns boolean
 language sql
@@ -117,6 +138,21 @@ as $$
       or upper(trim(coalesce(p_lead.property_state, ''))) = upper(trim(p_filters->>'state')))
     and (nullif(trim(coalesce(p_filters->>'city', '')), '') is null
       or lower(trim(coalesce(p_lead.city, ''))) = lower(trim(p_filters->>'city')))
+    and (nullif(trim(coalesce(p_filters->>'appointment_type', '')), '') is null
+      or report_api.appointment_type(p_lead) = p_filters->>'appointment_type')
+    and (nullif(trim(coalesce(p_filters->>'source_description', '')), '') is null
+      or lower(trim(coalesce(p_lead.source_lead_description, ''))) = lower(trim(p_filters->>'source_description')))
+    and (coalesce(p_filters->>'email_status', '') <> 'sent' or p_lead.live_email_sent is true)
+    and (coalesce(p_filters->>'email_status', '') <> 'not_sent' or coalesce(p_lead.live_email_sent, false) is false)
+    and (
+      nullif(trim(coalesce(p_filters->>'address_quality', '')), '') is null
+      or (p_filters->>'address_quality' = 'missing_city_or_zip' and
+        (nullif(trim(coalesce(p_lead.city,'')), '') is null or coalesce(p_lead.property_zip,'') !~ '^[0-9]{5}'))
+      or (p_filters->>'address_quality' = 'missing_city' and nullif(trim(coalesce(p_lead.city,'')), '') is null)
+      or (p_filters->>'address_quality' = 'missing_zip' and coalesce(p_lead.property_zip,'') !~ '^[0-9]{5}')
+      or (p_filters->>'address_quality' = 'complete' and nullif(trim(coalesce(p_lead.city,'')), '') is not null
+        and coalesce(p_lead.property_zip,'') ~ '^[0-9]{5}')
+    )
     and (
       nullif(trim(coalesce(p_filters->>'search', '')), '') is null
       or lower(concat_ws(' ', p_lead.first_name, p_lead.last_name)) like '%' || lower(trim(p_filters->>'search')) || '%'
@@ -126,6 +162,20 @@ as $$
       or p_lead.id::text = trim(p_filters->>'search')
       or lower(coalesce(p_lead.fub_id::text, '')) = lower(trim(p_filters->>'search'))
     )
+$$;
+
+create or replace function report_api.has_lead_filters(p_filters jsonb)
+returns boolean
+language sql
+immutable
+set search_path = ''
+as $$
+  select exists (
+    select 1 from jsonb_each_text(coalesce(p_filters, '{}'::jsonb)) f
+    where f.key in ('status','agent','vendor','lead_type','state','city','appointment_type',
+      'source_description','address_quality','email_status','search')
+      and nullif(trim(coalesce(f.value, '')), '') is not null
+  )
 $$;
 
 create or replace function public.dashboard_filter_options(p_from date, p_to date)
@@ -140,7 +190,8 @@ begin
   perform report_api.assert_access();
   perform report_api.validate_range(p_from, p_to);
   with leads as materialized (
-    select * from reporting.leads l
+    select l.lead_status,l.user_id,l.user_name,l.vendor,l.lead_type,l.property_state,l.city,l.source_lead_description
+    from reporting.leads l
     where l.lead_date_eastern between p_from and p_to
        or l.created_date_eastern between p_from and p_to
   )
@@ -152,6 +203,7 @@ begin
     ) a), '[]'::jsonb),
     'vendors', coalesce((select jsonb_agg(v order by v) from (select distinct trim(vendor) v from leads where nullif(trim(vendor),'') is not null) s), '[]'::jsonb),
     'lead_types', coalesce((select jsonb_agg(v order by v) from (select distinct trim(lead_type) v from leads where nullif(trim(lead_type),'') is not null) s), '[]'::jsonb),
+    'source_descriptions', coalesce((select jsonb_agg(v order by v) from (select distinct trim(source_lead_description) v from leads where nullif(trim(source_lead_description),'') is not null order by v limit 1000) s), '[]'::jsonb),
     'states', coalesce((select jsonb_agg(v order by v) from (select distinct upper(trim(property_state)) v from leads where nullif(trim(property_state),'') is not null) s), '[]'::jsonb),
     'cities', coalesce((select jsonb_agg(v order by v) from (select distinct trim(city) v from leads where nullif(trim(city),'') is not null order by v limit 1000) s), '[]'::jsonb)
   ) into v_result;
@@ -166,12 +218,14 @@ stable
 security definer
 set search_path = ''
 as $$
-declare v_result jsonb;
+declare v_result jsonb; v_has_filters boolean := report_api.has_lead_filters(p_filters);
 begin
   perform report_api.assert_access();
   perform report_api.validate_range(p_from, p_to);
   with all_filtered as materialized (
-    select l.* from reporting.leads l where report_api.lead_matches(l, p_filters)
+    select l.id,l.phone_key,l.lead_status,l.created_date_eastern,l.lead_date_eastern,
+      l.first_live_date_eastern,l.live_email_sent
+    from reporting.leads l where report_api.lead_matches(l, p_filters)
   ), selected as materialized (
     select l.* from all_filtered l
     where case when coalesce(p_filters->>'date_basis','activity') = 'created'
@@ -179,7 +233,9 @@ begin
   ), received as materialized (
     select l.* from all_filtered l where l.created_date_eastern between p_from and p_to
   ), calls as materialized (
-    select c.* from reporting.call_events c
+    select c.lead_id,c.phone_key,c.duration_seconds,c.ai_analysis_status,c.ai_agent_score,
+      c.ai_status_matches,c.ai_note_matches
+    from reporting.call_events c
     where c.call_date_eastern between p_from and p_to
       and (
         coalesce(nullif(trim(c.call_type_id), ''), '0') not in ('7','10')
@@ -188,23 +244,28 @@ begin
         or nullif(trim(coalesce(c.recording_url,'')),'') is not null
         or nullif(trim(coalesce(c.ai_transcript_original,'')),'') is not null
       )
-      and exists (
-        select 1 from all_filtered l
-        where l.id = c.lead_id or (c.lead_id is null and l.phone_key = c.phone_key)
+      and (
+        not v_has_filters
+        or (c.lead_id is not null and c.lead_id in (select l.id from all_filtered l))
+        or (c.lead_id is null and c.phone_key in (select l.phone_key from all_filtered l where l.phone_key is not null))
       )
   ), notes as materialized (
-    select n.* from reporting.note_events n
+    select n.lead_row_id,n.phone_key
+    from reporting.note_events n
     where n.note_date_eastern between p_from and p_to and n.is_new_append is true
-      and exists (
-        select 1 from all_filtered l
-        where l.id = n.lead_row_id or (n.lead_row_id is null and l.phone_key = n.phone_key)
+      and (
+        not v_has_filters
+        or (n.lead_row_id is not null and n.lead_row_id in (select l.id from all_filtered l))
+        or (n.lead_row_id is null and n.phone_key in (select l.phone_key from all_filtered l where l.phone_key is not null))
       )
   ), worked as (
-    select s.id from selected s where exists (
-      select 1 from calls c where c.lead_id = s.id or (c.lead_id is null and c.phone_key = s.phone_key)
-    ) or exists (
-      select 1 from notes n where n.lead_row_id = s.id or (n.lead_row_id is null and n.phone_key = s.phone_key)
-    )
+    select c.lead_id id from calls c where c.lead_id is not null
+    union
+    select s.id from selected s join calls c on c.lead_id is null and c.phone_key = s.phone_key
+    union
+    select n.lead_row_id id from notes n where n.lead_row_id is not null
+    union
+    select s.id from selected s join notes n on n.lead_row_id is null and n.phone_key = s.phone_key
   ), totals as (
     select
       (select count(*) from received)::bigint leads_received,
@@ -215,6 +276,7 @@ begin
         and l.live_email_sent is true and l.first_live_date_eastern between p_from and p_to)::bigint live_leads_sent,
       (select count(*) from calls)::bigint calls_logged,
       (select count(distinct coalesce(c.lead_id::text, 'phone:' || c.phone_key)) from calls c)::bigint unique_called_leads,
+      (select count(*) from selected s where trim(coalesce(s.lead_status,'')) like '2.%')::bigint contacted_leads,
       (select count(*) from calls c where coalesce(c.duration_seconds,0) >= 6)::bigint handled_calls,
       (select count(*) from notes)::bigint notes_added,
       (select count(distinct coalesce(n.lead_row_id::text, 'phone:' || n.phone_key)) from notes n)::bigint leads_with_notes,
@@ -239,13 +301,14 @@ begin
       'live_emails_sent', t.live_leads_sent,
       'calls_logged', t.calls_logged,
       'unique_called_leads', t.unique_called_leads,
+      'contacted_leads', t.contacted_leads,
       'handled_calls', t.handled_calls,
       'notes_added', t.notes_added,
       'leads_with_notes', t.leads_with_notes,
       'ai_reviewed', t.ai_reviewed,
       'average_ai_score', t.average_ai_score,
       'needs_attention', t.needs_attention,
-      'contact_rate', case when t.activity_cohort > 0 then round(t.unique_called_leads::numeric * 100 / t.activity_cohort, 1) else 0 end
+      'contact_rate', case when t.activity_cohort > 0 then round(t.contacted_leads::numeric * 100 / t.activity_cohort, 1) else 0 end
     ),
     'status_breakdown', coalesce((select jsonb_agg(to_jsonb(s)) from status_rows s), '[]'::jsonb),
     'daily_trend', coalesce((select jsonb_agg(to_jsonb(d)) from daily_rows d), '[]'::jsonb),
@@ -262,14 +325,14 @@ stable
 security definer
 set search_path = ''
 as $$
-declare v_result jsonb;
+declare v_result jsonb; v_has_filters boolean := report_api.has_lead_filters(p_filters);
 begin
   perform report_api.assert_access();
   perform report_api.validate_range(p_from, p_to);
   with filtered_leads as materialized (
-    select l.* from reporting.leads l where report_api.lead_matches(l, p_filters)
+    select l.id,l.phone_key from reporting.leads l where report_api.lead_matches(l, p_filters)
   ), base as materialized (
-    select c.*,
+    select c.lead_id,c.phone_key,c.user_id,c.user_name,c.duration_seconds,c.call_datetime_text,
       coalesce(nullif(trim(c.user_id),''), 'name:' || lower(nullif(trim(c.user_name),'')), 'unknown') caller_key
     from reporting.call_events c
     where c.call_date_eastern between p_from and p_to
@@ -280,7 +343,11 @@ begin
         or nullif(trim(coalesce(c.recording_url,'')),'') is not null
         or nullif(trim(coalesce(c.ai_transcript_original,'')),'') is not null
       )
-      and exists (select 1 from filtered_leads l where l.id=c.lead_id or (c.lead_id is null and l.phone_key=c.phone_key))
+      and (
+        not v_has_filters
+        or (c.lead_id is not null and c.lead_id in (select l.id from filtered_leads l))
+        or (c.lead_id is null and c.phone_key in (select l.phone_key from filtered_leads l where l.phone_key is not null))
+      )
   ), agent_stats as (
     select caller_key, coalesce(max(nullif(trim(user_name),'')),'Unknown') user_name,
       coalesce(max(nullif(trim(user_id),'')),'') user_id,
@@ -311,7 +378,11 @@ begin
       max(coalesce(n.note_created_at_utc,n.detected_at_utc)) last_note
     from reporting.note_events n
     where n.note_date_eastern between p_from and p_to and n.is_new_append is true
-      and exists (select 1 from filtered_leads l where l.id=n.lead_row_id or (n.lead_row_id is null and l.phone_key=n.phone_key))
+      and (
+        not v_has_filters
+        or (n.lead_row_id is not null and n.lead_row_id in (select l.id from filtered_leads l))
+        or (n.lead_row_id is null and n.phone_key in (select l.phone_key from filtered_leads l where l.phone_key is not null))
+      )
     group by 1 order by notes desc
   )
   select jsonb_build_object(
@@ -339,7 +410,7 @@ stable
 security definer
 set search_path = ''
 as $$
-declare v_result jsonb; v_page integer := greatest(coalesce(p_page,1),1); v_size integer := least(greatest(coalesce(p_page_size,50),10),200);
+declare v_result jsonb; v_page integer := greatest(coalesce(p_page,1),1); v_size integer := least(greatest(coalesce(p_page_size,50),10),200); v_has_filters boolean := report_api.has_lead_filters(p_filters);
 begin
   perform report_api.assert_access();
   perform report_api.validate_range(p_from, p_to);
@@ -370,14 +441,14 @@ stable
 security definer
 set search_path = ''
 as $$
-declare v_result jsonb; v_page integer := greatest(coalesce(p_page,1),1); v_size integer := least(greatest(coalesce(p_page_size,50),10),200);
+declare v_result jsonb; v_page integer := greatest(coalesce(p_page,1),1); v_size integer := least(greatest(coalesce(p_page_size,50),10),200); v_has_filters boolean := report_api.has_lead_filters(p_filters);
 begin
   perform report_api.assert_access();
   perform report_api.validate_range(p_from, p_to);
   with filtered_leads as materialized (
-    select l.* from reporting.leads l where report_api.lead_matches(l,p_filters)
+    select l.id,l.phone_key from reporting.leads l where report_api.lead_matches(l,p_filters)
   ), selected as materialized (
-    select c.* from reporting.call_events c
+    select c.id,c.call_timestamp from reporting.call_events c
     where c.call_date_eastern between p_from and p_to
       and (
         coalesce(nullif(trim(c.call_type_id), ''), '0') not in ('7','10')
@@ -386,7 +457,22 @@ begin
         or nullif(trim(coalesce(c.recording_url,'')),'') is not null
         or nullif(trim(coalesce(c.ai_transcript_original,'')),'') is not null
       )
-      and exists (select 1 from filtered_leads l where l.id=c.lead_id or (c.lead_id is null and l.phone_key=c.phone_key))
+      and (
+        not v_has_filters
+        or (c.lead_id is not null and c.lead_id in (select l.id from filtered_leads l))
+        or (c.lead_id is null and c.phone_key in (select l.phone_key from filtered_leads l where l.phone_key is not null))
+      )
+      and (coalesce(p_filters->>'ai_review','') <> 'completed'
+        or lower(trim(coalesce(c.ai_analysis_status,''))) = 'completed')
+      and (coalesce(p_filters->>'ai_review','') <> 'needs_review'
+        or (lower(trim(coalesce(c.ai_analysis_status,''))) = 'completed'
+          and (coalesce(c.ai_status_matches,true) is false or coalesce(c.ai_note_matches,true) is false)))
+      and (coalesce(p_filters->>'ai_review','') <> 'not_reviewed'
+        or lower(trim(coalesce(c.ai_analysis_status,''))) <> 'completed')
+      and (coalesce(p_filters->>'recording','') <> 'available'
+        or nullif(trim(coalesce(c.call_uuid,'')),'') is not null)
+      and (coalesce(p_filters->>'recording','') <> 'missing'
+        or nullif(trim(coalesce(c.call_uuid,'')),'') is null)
   ), page_ids as (
     select c.id from selected c order by c.call_timestamp desc nulls last,c.id desc limit v_size offset (v_page-1)*v_size
   ), page_rows as (
@@ -419,16 +505,20 @@ stable
 security definer
 set search_path = ''
 as $$
-declare v_result jsonb; v_page integer := greatest(coalesce(p_page,1),1); v_size integer := least(greatest(coalesce(p_page_size,50),10),100);
+declare v_result jsonb; v_page integer := greatest(coalesce(p_page,1),1); v_size integer := least(greatest(coalesce(p_page_size,50),10),100); v_has_filters boolean := report_api.has_lead_filters(p_filters);
 begin
   perform report_api.assert_access();
   perform report_api.validate_range(p_from, p_to);
   with filtered_leads as materialized (
-    select l.* from reporting.leads l where report_api.lead_matches(l,p_filters)
+    select l.id,l.phone_key from reporting.leads l where report_api.lead_matches(l,p_filters)
   ), selected as materialized (
-    select n.* from reporting.note_events n
+    select n.id,n.note_created_at_utc from reporting.note_events n
     where n.note_date_eastern between p_from and p_to and n.is_new_append is true
-      and exists (select 1 from filtered_leads l where l.id=n.lead_row_id or (n.lead_row_id is null and l.phone_key=n.phone_key))
+      and (
+        not v_has_filters
+        or (n.lead_row_id is not null and n.lead_row_id in (select l.id from filtered_leads l))
+        or (n.lead_row_id is null and n.phone_key in (select l.phone_key from filtered_leads l where l.phone_key is not null))
+      )
   ), page_ids as (
     select n.id from selected n order by n.note_created_at_utc desc nulls last,n.id desc limit v_size offset (v_page-1)*v_size
   ), page_rows as (
@@ -473,15 +563,31 @@ stable
 security definer
 set search_path = ''
 as $$
-declare v_result jsonb; v_page integer := greatest(coalesce(p_page,1),1); v_size integer := least(greatest(coalesce(p_page_size,50),10),100);
+declare v_result jsonb; v_page integer := greatest(coalesce(p_page,1),1); v_size integer := least(greatest(coalesce(p_page_size,50),10),100); v_has_filters boolean := report_api.has_lead_filters(p_filters);
 begin
   perform report_api.assert_access();
   perform report_api.validate_range(p_from, p_to);
   with filtered_leads as materialized (
-    select l.* from reporting.leads l where report_api.lead_matches(l,p_filters)
+    select l.id,l.phone_key from reporting.leads l where report_api.lead_matches(l,p_filters)
   ), selected as materialized (
-    select c.* from reporting.call_events c where c.call_date_eastern between p_from and p_to
-      and exists (select 1 from filtered_leads l where l.id=c.lead_id or (c.lead_id is null and l.phone_key=c.phone_key))
+    select c.id,c.call_timestamp,c.ai_analysis_status,c.ai_status_matches,c.ai_note_matches
+    from reporting.call_events c where c.call_date_eastern between p_from and p_to
+      and (
+        not v_has_filters
+        or (c.lead_id is not null and c.lead_id in (select l.id from filtered_leads l))
+        or (c.lead_id is null and c.phone_key in (select l.phone_key from filtered_leads l where l.phone_key is not null))
+      )
+      and (coalesce(p_filters->>'ai_review','') <> 'completed'
+        or lower(trim(coalesce(c.ai_analysis_status,''))) = 'completed')
+      and (coalesce(p_filters->>'ai_review','') <> 'needs_review'
+        or (lower(trim(coalesce(c.ai_analysis_status,''))) = 'completed'
+          and (coalesce(c.ai_status_matches,true) is false or coalesce(c.ai_note_matches,true) is false)))
+      and (coalesce(p_filters->>'ai_review','') <> 'not_reviewed'
+        or lower(trim(coalesce(c.ai_analysis_status,''))) <> 'completed')
+      and (coalesce(p_filters->>'recording','') <> 'available'
+        or nullif(trim(coalesce(c.call_uuid,'')),'') is not null)
+      and (coalesce(p_filters->>'recording','') <> 'missing'
+        or nullif(trim(coalesce(c.call_uuid,'')),'') is null)
       and nullif(trim(coalesce(c.call_uuid,'')),'') is not null
   ), page_ids as (
     select c.id from selected c
@@ -609,6 +715,10 @@ create index if not exists reporting_leads_activity_date_idx on reporting.leads 
 create index if not exists reporting_leads_created_date_idx on reporting.leads (created_date_eastern);
 create index if not exists reporting_leads_phone_key_idx on reporting.leads (phone_key);
 create index if not exists reporting_leads_email_lower_idx on reporting.leads (lower(trim(email)));
+create index if not exists reporting_leads_source_description_idx on reporting.leads (lower(trim(source_lead_description)));
+create index if not exists reporting_leads_live_email_idx on reporting.leads (live_email_sent);
+create index if not exists reporting_leads_city_idx on reporting.leads (lower(trim(city)));
+create index if not exists reporting_leads_zip_idx on reporting.leads (property_zip);
 create index if not exists reporting_leads_first_live_sent_idx on reporting.leads (first_live_date_eastern) where live_email_sent is true;
 create index if not exists reporting_calls_date_id_idx on reporting.call_events (call_date_eastern,id desc);
 create index if not exists reporting_calls_lead_date_idx on reporting.call_events (lead_id,call_date_eastern,id desc);
