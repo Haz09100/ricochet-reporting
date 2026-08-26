@@ -7,6 +7,7 @@ export const demoOverview = {
     live_emails_sent: 1190,
     calls_logged: 48143,
     unique_called_leads: 11920,
+    contacted_leads: 2568,
     handled_calls: 37757,
     notes_added: 18226,
     leads_with_notes: 10045,
