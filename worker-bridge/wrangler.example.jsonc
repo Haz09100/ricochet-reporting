@@ -1,0 +1,25 @@
+{
+  "name": "ricochet-report-bridge",
+  "main": "index.js",
+  "compatibility_date": "2026-08-25",
+  "observability": { "enabled": true },
+  "vars": {
+    "SUPABASE_URL": "https://YOUR_PROJECT.supabase.co",
+    "SUPABASE_PUBLISHABLE_KEY": "sb_publishable_YOUR_KEY",
+    "ALLOWED_ORIGINS": "https://YOUR_GITHUB_USER.github.io,http://localhost:5173,http://127.0.0.1:5173"
+  },
+  "services": [
+    {
+      "binding": "PRIVATE_D1_WORKER",
+      "service": "ricochet-lead-worker-d1-test"
+    }
+  ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "SUPABASE_SYNC_QUEUE",
+        "queue": "ricochet-supabase-sync"
+      }
+    ]
+  }
+}
