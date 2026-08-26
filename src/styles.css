@@ -73,6 +73,12 @@ input:focus, select:focus { border-color: #17a98a; box-shadow: 0 0 0 3px rgba(23
 .metric-card strong { display: block; margin: 9px 0 8px; color: #12213a; font-size: 28px; letter-spacing: -.035em; }
 .metric-card small { color: var(--muted); font-size: 11px; }
 .dashboard-grid { display: grid; grid-template-columns: 2fr 1fr; gap: 12px; margin-top: 12px; }
+.pipeline-panel { margin-top: 12px; }
+.pipeline-legend { display: flex; flex-wrap: wrap; gap: 8px 16px; color: var(--muted); font-size: 10px; }
+.pipeline-legend b { color: #243750; }
+.status-row.detailed { grid-template-columns: minmax(190px,.75fr) minmax(130px,1fr) minmax(230px,1fr); }
+.compact-metrics { grid-template-columns: repeat(6,minmax(0,1fr)); margin-top: 12px; }
+.compact-metrics .metric-card { min-height: 105px; }
 .panel { padding: 17px; }
 .panel-heading { display: flex; align-items: center; justify-content: space-between; }
 .panel h3 { margin: 4px 0 0; font-size: 15px; }
