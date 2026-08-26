@@ -28,7 +28,7 @@ export function OverviewView({ data }) {
     ["Worked leads", totals.worked_leads, "Qualifying call or new note", "green"],
     ["Live leads sent", totals.live_leads_sent, "First live status + email sent", "green"],
     ["Live emails sent", totals.live_emails_sent, "Passed note check and sent", "mint"],
-    ["Contact rate", `${number(totals.contact_rate, 1)}%`, `${number(totals.unique_called_leads)} unique called leads`, "green"],
+    ["Contact rate", `${number(totals.contact_rate, 1)}%`, `${number(totals.contacted_leads)} reached (2.x)`, "green"],
     ["Calls logged", totals.calls_logged, `${number(totals.handled_calls)} handled calls`, "slate"],
     ["Notes added", totals.notes_added, `${number(totals.leads_with_notes)} leads received notes`, "violet"],
     ["AI reviewed", totals.ai_reviewed, "Reviewed calls in selected range", "gold"],

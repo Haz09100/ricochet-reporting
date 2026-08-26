@@ -38,7 +38,7 @@ export default function AudioPlayer({ callUuid, compact = false }) {
       {loading ? <LoaderCircle className="spin" size={15} /> : playing ? <Pause size={15} /> : urls.length ? <Play size={15} /> : <Headphones size={15} />}
       {loading ? "Loading…" : urls.length ? playing ? "Pause" : "Play" : "Load recording"}
     </button>
-    {error && <span className="recording-error" title={error}>Recording unavailable</span>}
+    {error && <span className="recording-error" title={error}>{error.includes("bridge URL") ? "Recording bridge needs setup" : "Recording unavailable"}</span>}
     {urls.map((url, index) => <audio key={url} ref={index === 0 ? audioRef : null} controls={!compact || urls.length > 1} preload="metadata" src={url} onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)} />)}
   </div>;
 }
