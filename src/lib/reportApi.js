@@ -9,6 +9,8 @@ const rpcNames = Object.freeze({
   leads: "dashboard_leads",
   teacher: "dashboard_ai_review",
 });
+const reportCache = new Map();
+const CACHE_MS = 60_000;
 
 function requiredClient() {
   if (!supabase) throw new Error("Supabase is not configured for this build.");
@@ -27,6 +29,12 @@ export function reportParameters(filters, extra = {}) {
       lead_type: filters.leadType,
       state: filters.state,
       city: filters.city,
+      appointment_type: filters.appointmentType,
+      source_description: filters.sourceDescription,
+      address_quality: filters.addressQuality,
+      email_status: filters.emailStatus,
+      ai_review: filters.aiReview,
+      recording: filters.recording,
       search: filters.search,
       ...extra.filters,
     },
@@ -35,16 +43,21 @@ export function reportParameters(filters, extra = {}) {
   };
 }
 
-export async function loadReportPage(page, filters, pagination = {}) {
+export async function loadReportPage(page, filters, pagination = {}, { bypassCache = false } = {}) {
   const name = rpcNames[page] || rpcNames.overview;
   const withPagination = ["calls", "notes", "leads", "teacher"].includes(page);
   const params = reportParameters(filters, withPagination ? {
     page: pagination.page || 1,
     pageSize: pagination.pageSize || 50,
   } : {});
+  const cacheKey = JSON.stringify([page, params]);
+  const cached = reportCache.get(cacheKey);
+  if (!bypassCache && cached && Date.now() - cached.savedAt < CACHE_MS) return cached.data;
   const { data, error } = await requiredClient().rpc(name, params);
   if (error) throw new Error(error.message || `Could not load ${page}.`);
-  return data || {};
+  const result = data || {};
+  reportCache.set(cacheKey, { data: result, savedAt: Date.now() });
+  return result;
 }
 
 export async function loadFilterOptions(from, to) {
