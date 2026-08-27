@@ -17,6 +17,38 @@ const longDuration = (seconds) => {
 };
 const value = (item, ...keys) => keys.map((key) => item?.[key]).find((candidate) => candidate !== undefined && candidate !== null && candidate !== "") ?? "—";
 const fullName = (row) => [row.first_name, row.last_name].filter(Boolean).join(" ") || "Unknown lead";
+const cleanNoteText = (text) => String(text || "").replace(/\r/g, "").trim();
+const noteKey = (note) => String(note.ricochet_note_id || note.note_sequence || cleanNoteText(note.note_text).toLowerCase().slice(0, 100));
+const formatNoteTime = (input) => {
+  if (!input) return "Time unavailable";
+  const parsed = new Date(input);
+  return Number.isNaN(parsed.getTime()) ? String(input) : parsed.toLocaleString(undefined, { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" });
+};
+
+function parseHistoricalNotes(raw) {
+  return cleanNoteText(raw).split(/\s*-{4,}\s*/).map((block, index) => {
+    const lines = block.split("\n").map((line) => line.trim()).filter(Boolean);
+    let sequence = index + 1; let ricochet_note_id = ""; let note_user_email = ""; let note_user_id = ""; const body = [];
+    for (const line of lines) {
+      const sequenceMatch = line.match(/^Note\s+(\d+)\s*$/i); if (sequenceMatch) { sequence = Number(sequenceMatch[1]); continue; }
+      const userMatch = line.match(/^User:\s*(.+)$/i); if (userMatch) { note_user_email = userMatch[1].trim(); continue; }
+      const userIdMatch = line.match(/^User\s*ID:\s*(.+)$/i); if (userIdMatch) { note_user_id = userIdMatch[1].trim(); continue; }
+      const noteIdMatch = line.match(/^Note\s*ID:\s*(.+)$/i); if (noteIdMatch) { ricochet_note_id = noteIdMatch[1].trim(); continue; }
+      body.push(line);
+    }
+    return { note_sequence: sequence, ricochet_note_id, note_user_email, note_user_id, note_user_name: note_user_email ? note_user_email.split("@")[0].replace(/[._]+/g, " ") : "", note_text: body.join("\n"), historical_fallback: true };
+  }).filter((note) => cleanNoteText(note.note_text) || note.ricochet_note_id).sort((a, b) => Number(b.note_sequence || 0) - Number(a.note_sequence || 0));
+}
+
+function mergedNotes(row) {
+  const structured = (row.note_items || []).map((note) => ({ ...note, note_text: cleanNoteText(note.note_text) }));
+  const known = new Set(structured.map(noteKey));
+  const fallback = parseHistoricalNotes(row.note_text).filter((note) => !known.has(noteKey(note)));
+  const combined = [...structured, ...fallback].sort((a, b) => Number(b.note_sequence || 0) - Number(a.note_sequence || 0) || String(b.note_time || "").localeCompare(String(a.note_time || "")));
+  const latestText = cleanNoteText(row.latest_note);
+  if (latestText && !combined.some((note) => cleanNoteText(note.note_text) === latestText)) combined.unshift({ note_sequence: Number.MAX_SAFE_INTEGER, note_text: latestText, note_user_name: row.note_user_name, note_user_email: row.note_user_email, note_time: row.note_created_at, call_uuid: (row.recordings || []).find((call) => call.exact_match)?.call_uuid, call_date_time: (row.recordings || []).find((call) => call.exact_match)?.call_date_time });
+  return combined;
+}
 
 function Empty({ message }) { return <div className="empty"><Search size={22} /><strong>No matching data</strong><span>{message}</span></div>; }
 function ErrorBox({ message }) { return message ? <div className="error-box"><TriangleAlert size={17} />{message}</div> : null; }
@@ -84,9 +116,23 @@ export function CallsView({ data, page, setPage, setToast }) {
 export function NotesView({ data, page, setPage }) {
   const rows = data?.rows || [];
   return <><div className="section-heading"><div><span className="eyebrow">Notes</span><h2>Complete notes on file with recording timeline</h2><p>Each card now uses the lead’s full synchronized note history, not only notes detected after the new report was installed.</p></div></div>
-    {!rows.length ? <Empty message="No notes matched these filters." /> : <div className="notes-grid">{rows.map((row) => <article className="note-card" key={row.id}><div className="note-top"><div><h3>{fullName(row)}</h3><div className="tag-row"><span className="tag">{value(row, "lead_status")}</span><span className="tag quiet">{value(row, "lead_type")}</span></div></div><time>{value(row, "note_created_at")}</time></div><p className="note-text">{value(row, "note_text")}</p><div className="note-meta">{value(row, "note_user_name")} · {row.phone || "No phone"}</div><details className="timeline" open><summary><Headphones size={14} /> Recording timeline · {row.recordings?.length || 0} calls</summary>{(row.recordings || []).length ? row.recordings.map((call) => <div className="timeline-row" key={call.id}><div><strong>{call.exact_match ? "Exact note match" : value(call, "call_date_time")}</strong><span>{value(call, "user_name")} · {duration(call.duration_seconds)} · {value(call, "direction")}</span></div><AudioPlayer compact callUuid={call.call_uuid} /></div>) : <span className="muted">No playable recordings are synchronized for this lead.</span>}</details></article>)}</div>}
+    {!rows.length ? <Empty message="No notes matched these filters." /> : <div className="notes-grid">{rows.map((row) => <NoteCard row={row} key={row.id} />)}</div>}
     <Pager data={data} page={page} setPage={setPage} />
   </>;
+}
+
+function NoteEntry({ note, latest, live }) {
+  const [expanded, setExpanded] = useState(false);
+  const body = cleanNoteText(note.note_text) || "No note text";
+  const isLong = body.length > 240 || body.split("\n").length > 5;
+  const owner = value(note, "note_user_name", "note_user_email");
+  return <section className={`note-entry${latest ? " latest" : ""}${live ? " live" : ""}`}><div className="note-entry-heading"><div><strong>{latest ? "Latest note" : `Note ${number(note.note_sequence)}`}</strong>{live && <span className="live-note-label">Live-status note</span>}</div><time>{formatNoteTime(note.note_time)}</time></div><div className="note-owner"><span>{owner}</span>{note.note_user_id && <small>ID {note.note_user_id}</small>}{note.ricochet_note_id && <small>Note {note.ricochet_note_id}</small>}</div><p className={expanded ? "note-body expanded" : "note-body"}>{body}</p><div className="note-entry-actions">{isLong && <button className="text-action" onClick={() => setExpanded(!expanded)}>{expanded ? "Show less" : "Read more"}</button>}{note.call_uuid ? <AudioPlayer compact callUuid={note.call_uuid} /> : <span className="unmatched-recording">No exact recording match</span>}</div></section>;
+}
+
+function NoteCard({ row }) {
+  const notes = mergedNotes(row); const latest = notes[0]; const older = notes.slice(1);
+  const live = /live|appointment/i.test(String(row.lead_status || ""));
+  return <article className={`note-card compact-note-card${live ? " live-lead-note" : ""}`}><div className="note-top"><div><h3>{fullName(row)}</h3><div className="tag-row"><span className={`tag${live ? " live-tag" : ""}`}>{value(row, "lead_status")}</span><span className="tag quiet">{value(row, "lead_type")}</span></div></div><span className="note-count">{number(notes.length)} notes</span></div>{latest ? <NoteEntry note={latest} latest live={live} /> : <span className="muted">No readable note was synchronized.</span>}{older.length > 0 && <details className="older-notes"><summary>View {number(older.length)} older notes</summary><div className="older-note-list">{older.map((note, index) => <NoteEntry note={note} key={`${noteKey(note)}-${index}`} />)}</div></details>}<details className="timeline"><summary><Headphones size={14} />All related recordings · {row.recordings?.length || 0}</summary>{(row.recordings || []).length ? row.recordings.map((call) => <div className="timeline-row" key={call.id}><div><strong>{call.exact_match ? "Latest exact note match" : value(call, "call_date_time")}</strong><span>{value(call, "user_name")} · {duration(call.duration_seconds)} · {value(call, "direction")}</span></div><AudioPlayer compact callUuid={call.call_uuid} /></div>) : <span className="muted">No playable recordings are synchronized for this lead.</span>}</details></article>;
 }
 
 export function LeadsView({ data, page, setPage }) {
