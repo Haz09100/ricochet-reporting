@@ -50,6 +50,18 @@ function mergedNotes(row) {
   return combined;
 }
 
+function displayedLeadType(row, notes = []) {
+  const text = cleanNoteText(row.latest_note || notes[0]?.note_text || row.note_text).toLowerCase();
+  const sellerForm = /(^|\s)seller form(\s|$)/i.test(text) || text.includes("seller motivation and financials") || text.includes("why selling now:");
+  const buyerForm = /(^|\s)buyer form(\s|$)/i.test(text) || text.includes("primary reason for buying now:") || text.includes("target move-in date");
+  const buyerIntent = /(want|wants|wanted|need|needs|plan|plans|planning|looking|ready|hoping)\s+to\s+(buy|purchase)/i.test(text) || /(buying|purchasing)\s+(another|a|their|his|her)\s+(home|house|property)/i.test(text) || /home to sell first.{0,40}(yes|true)/i.test(text);
+  const sellerIntent = /(want|wants|wanted|need|needs|plan|plans|planning|looking|ready|consider|considering)\s+to\s+sell/i.test(text) || sellerForm;
+  if ((sellerForm && buyerIntent) || (buyerForm && sellerIntent) || (buyerIntent && sellerIntent)) return "Buyer and Seller";
+  if (sellerForm || sellerIntent) return "Seller";
+  if (buyerForm || buyerIntent) return "Buyer";
+  return value(row, "lead_type");
+}
+
 function Empty({ message }) { return <div className="empty"><Search size={22} /><strong>No matching data</strong><span>{message}</span></div>; }
 function ErrorBox({ message }) { return message ? <div className="error-box"><TriangleAlert size={17} />{message}</div> : null; }
 function Pager({ data, page, setPage }) {
@@ -132,7 +144,7 @@ function NoteEntry({ note, latest, live }) {
 function NoteCard({ row }) {
   const notes = mergedNotes(row); const latest = notes[0]; const older = notes.slice(1);
   const live = /live|appointment/i.test(String(row.lead_status || ""));
-  return <article className={`note-card compact-note-card${live ? " live-lead-note" : ""}`}><div className="note-top"><div><h3>{fullName(row)}</h3><div className="tag-row"><span className={`tag${live ? " live-tag" : ""}`}>{value(row, "lead_status")}</span><span className="tag quiet">{value(row, "lead_type")}</span></div></div><span className="note-count">{number(notes.length)} notes</span></div>{latest ? <NoteEntry note={latest} latest live={live} /> : <span className="muted">No readable note was synchronized.</span>}{older.length > 0 && <details className="older-notes"><summary>View {number(older.length)} older notes</summary><div className="older-note-list">{older.map((note, index) => <NoteEntry note={note} key={`${noteKey(note)}-${index}`} />)}</div></details>}<details className="timeline"><summary><Headphones size={14} />All related recordings · {row.recordings?.length || 0}</summary>{(row.recordings || []).length ? row.recordings.map((call) => <div className="timeline-row" key={call.id}><div><strong>{call.exact_match ? "Latest exact note match" : value(call, "call_date_time")}</strong><span>{value(call, "user_name")} · {duration(call.duration_seconds)} · {value(call, "direction")}</span></div><AudioPlayer compact callUuid={call.call_uuid} /></div>) : <span className="muted">No playable recordings are synchronized for this lead.</span>}</details></article>;
+  return <article className={`note-card compact-note-card${live ? " live-lead-note" : ""}`}><div className="note-top"><div><h3>{fullName(row)}</h3><div className="tag-row"><span className={`tag${live ? " live-tag" : ""}`}>{value(row, "lead_status")}</span><span className="tag quiet">{displayedLeadType(row, notes)}</span></div></div><span className="note-count">{number(notes.length)} notes</span></div>{latest ? <NoteEntry note={latest} latest live={live} /> : <span className="muted">No readable note was synchronized.</span>}{older.length > 0 && <details className="older-notes"><summary>View {number(older.length)} older notes</summary><div className="older-note-list">{older.map((note, index) => <NoteEntry note={note} key={`${noteKey(note)}-${index}`} />)}</div></details>}<details className="timeline"><summary><Headphones size={14} />All related recordings · {row.recordings?.length || 0}</summary>{(row.recordings || []).length ? row.recordings.map((call) => <div className="timeline-row" key={call.id}><div><strong>{call.exact_match ? "Latest exact note match" : value(call, "call_date_time")}</strong><span>{value(call, "user_name")} · {duration(call.duration_seconds)} · {value(call, "direction")}</span></div><AudioPlayer compact callUuid={call.call_uuid} /></div>) : <span className="muted">No playable recordings are synchronized for this lead.</span>}</details></article>;
 }
 
 export function LeadsView({ data, page, setPage }) {
