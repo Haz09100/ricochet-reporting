@@ -11,6 +11,7 @@ const rpcNames = Object.freeze({
 });
 const reportCache = new Map();
 const CACHE_MS = 60_000;
+const wait = (milliseconds) => new Promise((resolve) => window.setTimeout(resolve, milliseconds));
 
 function requiredClient() {
   if (!supabase) throw new Error("Supabase is not configured for this build.");
@@ -53,7 +54,12 @@ export async function loadReportPage(page, filters, pagination = {}, { bypassCac
   const cacheKey = JSON.stringify([page, params]);
   const cached = reportCache.get(cacheKey);
   if (!bypassCache && cached && Date.now() - cached.savedAt < CACHE_MS) return cached.data;
-  const { data, error } = await requiredClient().rpc(name, params);
+  let response = await requiredClient().rpc(name, params);
+  if (response.error && /statement timeout|canceling statement/i.test(response.error.message || "")) {
+    await wait(1200);
+    response = await requiredClient().rpc(name, params);
+  }
+  const { data, error } = response;
   if (error) throw new Error(error.message || `Could not load ${page}.`);
   const result = data || {};
   reportCache.set(cacheKey, { data: result, savedAt: Date.now() });
