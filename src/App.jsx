@@ -51,7 +51,7 @@ function easternDateKey(value = new Date()) {
 
 const today = easternDateKey();
 const initialFilters = {
-  from: `${today.slice(0, 8)}01`,
+  from: today,
   to: today,
   dateBasis: "activity",
   status: "",
