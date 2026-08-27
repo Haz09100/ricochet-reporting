@@ -97,6 +97,36 @@ as $$
   end
 $$;
 
+create or replace function report_api.normalize_agent(p_value text)
+returns text
+language sql
+immutable
+set search_path = ''
+as $$
+  select lower(regexp_replace(coalesce(p_value,''), '[^a-zA-Z0-9]+', '', 'g'))
+$$;
+
+create or replace function report_api.form_isa(p_value text)
+returns text
+language sql
+immutable
+set search_path = ''
+as $$
+  select coalesce(
+    nullif(trim(substring(coalesce(p_value,'') from '(?i)ISA[[:space:]]*:[[:space:]]*([A-Za-z][A-Za-z .''-]{1,60}?)[[:space:]]+(?:CURRENT|VENDOR|LOCATION|PROPERTY|PRICE|MOTIVATION|QLT)')),''),
+    nullif(trim(substring(coalesce(p_value,'') from '(?i)ISA[[:space:]]*:[[:space:]]*([^\r\n]{2,80})')),'')
+  )
+$$;
+
+create or replace function report_api.form_isa(p_lead reporting.leads)
+returns text
+language sql
+stable
+set search_path = ''
+as $$
+  select report_api.form_isa(coalesce(nullif(trim(p_lead.note),''),nullif(trim(p_lead.all_notes),''),''))
+$$;
+
 create or replace function report_api.appointment_type(p_lead reporting.leads)
 returns text
 language sql
@@ -118,6 +148,46 @@ as $$
   end from source
 $$;
 
+create or replace function report_api.classified_lead_type(p_lead reporting.leads)
+returns text
+language sql
+stable
+set search_path = ''
+as $$
+  with source as (
+    select lower(coalesce(nullif(trim(p_lead.note),''),nullif(trim(p_lead.all_notes),''),'')) value,
+      trim(coalesce(p_lead.lead_type,'')) stored
+  ), signals as (
+    select value,stored,
+      (value ~ '(^|[[:space:]])seller form([[:space:]]|$)'
+        or value like '%seller motivation and financials%'
+        or value like '%why selling now:%') seller_form,
+      (value ~ '(^|[[:space:]])buyer form([[:space:]]|$)'
+        or value like '%primary reason for buying now:%'
+        or value like '%target move-in date%') buyer_form,
+      (value ~ '(want|wants|wanted|need|needs|plan|plans|planning|looking|ready|hoping)[[:space:]]+to[[:space:]]+(buy|purchase)'
+        or value ~ '(buying|purchasing)[[:space:]]+(another|a|their|his|her)[[:space:]]+(home|house|property)'
+        or value ~ 'home to sell first.{0,40}(yes|true)') buyer_intent,
+      (value ~ '(want|wants|wanted|need|needs|plan|plans|planning|looking|ready|consider|considering)[[:space:]]+to[[:space:]]+sell'
+        or value like '%seller motivation and financials%'
+        or value like '%why selling now:%') seller_intent
+    from source
+  )
+  select case
+    when seller_form and buyer_intent then 'Buyer and Seller'
+    when buyer_form and seller_intent then 'Buyer and Seller'
+    when seller_form then 'Seller'
+    when buyer_form then 'Buyer'
+    when buyer_intent and seller_intent then 'Buyer and Seller'
+    when buyer_intent then 'Buyer'
+    when seller_intent then 'Seller'
+    when lower(stored) in ('buyer and seller','seller and buyer') then 'Buyer and Seller'
+    when lower(stored)='buyer' then 'Buyer'
+    when lower(stored)='seller' then 'Seller'
+    else 'Unknown'
+  end from signals
+$$;
+
 create or replace function report_api.lead_matches(p_lead reporting.leads, p_filters jsonb)
 returns boolean
 language sql
@@ -133,7 +203,7 @@ as $$
     and (nullif(trim(coalesce(p_filters->>'vendor', '')), '') is null
       or lower(trim(coalesce(p_lead.vendor, ''))) = lower(trim(p_filters->>'vendor')))
     and (nullif(trim(coalesce(p_filters->>'lead_type', '')), '') is null
-      or p_lead.lead_type = p_filters->>'lead_type')
+      or report_api.classified_lead_type(p_lead) = p_filters->>'lead_type')
     and (nullif(trim(coalesce(p_filters->>'state', '')), '') is null
       or upper(trim(coalesce(p_lead.property_state, ''))) = upper(trim(p_filters->>'state')))
     and (nullif(trim(coalesce(p_filters->>'city', '')), '') is null
@@ -202,7 +272,7 @@ begin
       from leads where nullif(trim(coalesce(user_id,user_name,'')),'') is not null
     ) a), '[]'::jsonb),
     'vendors', coalesce((select jsonb_agg(v order by v) from (select distinct trim(vendor) v from leads where nullif(trim(vendor),'') is not null) s), '[]'::jsonb),
-    'lead_types', coalesce((select jsonb_agg(v order by v) from (select distinct trim(lead_type) v from leads where nullif(trim(lead_type),'') is not null) s), '[]'::jsonb),
+    'lead_types', jsonb_build_array('Buyer','Seller','Buyer and Seller','Unknown'),
     'source_descriptions', coalesce((select jsonb_agg(v order by v) from (select distinct trim(source_lead_description) v from leads where nullif(trim(source_lead_description),'') is not null order by v limit 1000) s), '[]'::jsonb),
     'states', coalesce((select jsonb_agg(v order by v) from (select distinct upper(trim(property_state)) v from leads where nullif(trim(property_state),'') is not null) s), '[]'::jsonb),
     'cities', coalesce((select jsonb_agg(v order by v) from (select distinct trim(city) v from leads where nullif(trim(city),'') is not null order by v limit 1000) s), '[]'::jsonb)
@@ -225,7 +295,13 @@ begin
   with all_filtered as materialized (
     select l.id,l.phone_key,l.lead_status,l.created_date_eastern,l.lead_date_eastern,
       l.first_live_date_eastern,l.live_email_sent
-    from reporting.leads l where report_api.lead_matches(l, p_filters)
+    from reporting.leads l
+    where (
+      not v_has_filters
+      and (l.created_date_eastern between p_from and p_to
+        or l.lead_date_eastern between p_from and p_to
+        or l.first_live_date_eastern between p_from and p_to)
+    ) or (v_has_filters and report_api.lead_matches(l, p_filters))
   ), selected as materialized (
     select l.* from all_filtered l
     where case when coalesce(p_filters->>'date_basis','activity') = 'created'
@@ -233,7 +309,7 @@ begin
   ), received as materialized (
     select l.* from all_filtered l where l.created_date_eastern between p_from and p_to
   ), calls as materialized (
-    select c.lead_id,c.phone_key,c.duration_seconds,c.ai_analysis_status,c.ai_agent_score,
+    select c.lead_id,c.phone_key,c.user_id,c.duration_seconds,c.ai_analysis_status,c.ai_agent_score,
       c.ai_status_matches,c.ai_note_matches
     from reporting.call_events c
     where c.call_date_eastern between p_from and p_to
@@ -258,19 +334,32 @@ begin
         or (n.lead_row_id is not null and n.lead_row_id in (select l.id from all_filtered l))
         or (n.lead_row_id is null and n.phone_key in (select l.phone_key from all_filtered l where l.phone_key is not null))
       )
+  ), selected_calls as materialized (
+    select c.lead_id id from calls c join selected s on s.id=c.lead_id where c.lead_id is not null
+    union all
+    select s.id from calls c join selected s on c.lead_id is null and c.phone_key=s.phone_key
+  ), selected_notes as materialized (
+    select n.lead_row_id id from notes n join selected s on s.id=n.lead_row_id where n.lead_row_id is not null
+    union all
+    select s.id from notes n join selected s on n.lead_row_id is null and n.phone_key=s.phone_key
   ), worked as (
-    select c.lead_id id from calls c where c.lead_id is not null
+    select id from selected_calls
     union
-    select s.id from selected s join calls c on c.lead_id is null and c.phone_key = s.phone_key
-    union
-    select n.lead_row_id id from notes n where n.lead_row_id is not null
-    union
-    select s.id from selected s join notes n on n.lead_row_id is null and n.phone_key = s.phone_key
+    select id from selected_notes
+  ), selected_call_counts as (
+    select sc.id,count(*)::bigint calls from selected_calls sc group by sc.id
+  ), appointment_counts as (
+    select
+      count(*) filter (where report_api.appointment_type(l) = 'Phone call')::bigint phone,
+      count(*) filter (where report_api.appointment_type(l) = 'In person')::bigint in_person,
+      count(*) filter (where report_api.appointment_type(l) in ('Virtual','Other / unclear'))::bigint other
+    from selected s join reporting.leads l on l.id=s.id
   ), totals as (
     select
       (select count(*) from received)::bigint leads_received,
       (select count(*) from selected)::bigint activity_cohort,
       (select count(*) from worked)::bigint worked_leads,
+      (select count(*) from received r where not exists (select 1 from worked w where w.id = r.id))::bigint untouched_received,
       (select count(*) from all_filtered l where
         (lower(trim(coalesce(l.lead_status,''))) like '%live%' or lower(trim(coalesce(l.lead_status,''))) like '%appointment%')
         and l.live_email_sent is true and l.first_live_date_eastern between p_from and p_to)::bigint live_leads_sent,
@@ -278,6 +367,8 @@ begin
       (select count(distinct coalesce(c.lead_id::text, 'phone:' || c.phone_key)) from calls c)::bigint unique_called_leads,
       (select count(*) from selected s where trim(coalesce(s.lead_status,'')) like '2.%')::bigint contacted_leads,
       (select count(*) from calls c where coalesce(c.duration_seconds,0) >= 6)::bigint handled_calls,
+      (select coalesce(sum(c.duration_seconds),0) from calls c)::bigint total_call_seconds,
+      (select count(distinct nullif(trim(c.user_id),'')) from calls c)::bigint active_callers,
       (select count(*) from notes)::bigint notes_added,
       (select count(distinct coalesce(n.lead_row_id::text, 'phone:' || n.phone_key)) from notes n)::bigint leads_with_notes,
       (select count(*) from calls c where lower(trim(coalesce(c.ai_analysis_status,''))) = 'completed')::bigint ai_reviewed,
@@ -285,8 +376,14 @@ begin
       (select count(*) from calls c where lower(trim(coalesce(c.ai_analysis_status,''))) = 'completed'
         and (coalesce(c.ai_status_matches,true) is false or coalesce(c.ai_note_matches,true) is false))::bigint needs_attention
   ), status_rows as (
-    select coalesce(nullif(trim(s.lead_status),''),'Unknown') status, count(*)::bigint count
-    from selected s group by 1 order by count desc, status
+    select coalesce(nullif(trim(s.lead_status),''),'Unknown') status,
+      count(*)::bigint count,
+      count(*) filter (where w.id is not null)::bigint worked,
+      coalesce(sum(sc.calls),0)::bigint calls
+    from selected s
+    left join worked w on w.id = s.id
+    left join selected_call_counts sc on sc.id = s.id
+    group by 1 order by count desc, status
   ), daily_rows as (
     select (case when coalesce(p_filters->>'date_basis','activity') = 'created' then s.created_date_eastern else s.lead_date_eastern end) report_date,
       count(*)::bigint leads
@@ -297,17 +394,27 @@ begin
       'leads_received', t.leads_received,
       'activity_cohort', t.activity_cohort,
       'worked_leads', t.worked_leads,
+      'untouched_received', t.untouched_received,
       'live_leads_sent', t.live_leads_sent,
       'live_emails_sent', t.live_leads_sent,
       'calls_logged', t.calls_logged,
       'unique_called_leads', t.unique_called_leads,
       'contacted_leads', t.contacted_leads,
       'handled_calls', t.handled_calls,
+      'total_call_seconds', t.total_call_seconds,
+      'active_callers', t.active_callers,
       'notes_added', t.notes_added,
       'leads_with_notes', t.leads_with_notes,
       'ai_reviewed', t.ai_reviewed,
       'average_ai_score', t.average_ai_score,
       'needs_attention', t.needs_attention,
+      'converted', (select count(*) from selected s where trim(coalesce(s.lead_status,'')) like '3.%'),
+      'follow_ups', (select count(*) from selected s where trim(coalesce(s.lead_status,'')) like '2.0%'),
+      'not_interested', (select count(*) from selected s where trim(coalesce(s.lead_status,'')) like '2.1%'),
+      'bad_contacts', (select count(*) from selected s where trim(coalesce(s.lead_status,'')) like '1.4%'),
+      'live_phone_appointments', (select phone from appointment_counts),
+      'live_in_person_appointments', (select in_person from appointment_counts),
+      'other_live_appointments', (select other from appointment_counts),
       'contact_rate', case when t.activity_cohort > 0 then round(t.contacted_leads::numeric * 100 / t.activity_cohort, 1) else 0 end
     ),
     'status_breakdown', coalesce((select jsonb_agg(to_jsonb(s)) from status_rows s), '[]'::jsonb),
@@ -330,7 +437,7 @@ begin
   perform report_api.assert_access();
   perform report_api.validate_range(p_from, p_to);
   with filtered_leads as materialized (
-    select l.id,l.phone_key from reporting.leads l where report_api.lead_matches(l, p_filters)
+    select l.id,l.phone_key from reporting.leads l where v_has_filters and report_api.lead_matches(l, p_filters)
   ), base as materialized (
     select c.lead_id,c.phone_key,c.user_id,c.user_name,c.duration_seconds,c.call_datetime_text,
       coalesce(nullif(trim(c.user_id),''), 'name:' || lower(nullif(trim(c.user_name),'')), 'unknown') caller_key
@@ -384,6 +491,83 @@ begin
         or (n.lead_row_id is null and n.phone_key in (select l.phone_key from filtered_leads l where l.phone_key is not null))
       )
     group by 1 order by notes desc
+  ), live_candidates as materialized (
+    select l.id,l.phone_key,l.first_live_date_eastern
+    from reporting.leads l
+    where l.first_live_date_eastern between p_from and p_to
+      and l.live_email_sent is true
+      and (not v_has_filters or report_api.lead_matches(l,p_filters - 'agent' - 'status'))
+  ), live_gated as materialized (
+    select l.id,l.phone_key,l.first_live_date_eastern,
+      n.original_live_status,n.gate_note_at,n.gate_note_date,n.matched_call_event_id,
+      report_api.form_isa(n.note_text) form_isa,
+      coalesce(nullif(trim(n.note_user_name),''),nullif(trim(split_part(n.note_user_email,'@',1)),''), 'Unknown') note_owner,
+      coalesce(nullif(trim(n.note_user_id),''),'') note_owner_id,
+      coalesce(nullif(trim(n.note_user_email),''),'') note_owner_email
+    from live_candidates l
+    join lateral (
+      select n.note_user_name,n.note_user_id,n.note_user_email,n.note_text,n.matched_call_event_id,
+        coalesce(n.note_created_at_utc,n.detected_at_utc) gate_note_at,n.note_date_eastern gate_note_date,
+        case
+          when n.note_text ~* 'DISPOSITION[[:space:]]*:[[:space:]]*(2[.]3[[:space:]]*)?LIVE[[:space:]]+TRANSFER' then '2.3 Live Transfer'
+          when n.note_text ~* 'DISPOSITION[[:space:]]*:[[:space:]]*(2[.]4[[:space:]]*)?LIVE[[:space:]]+CALL[[:space:]]*BACK' then '2.4 Live Call Back'
+          when n.note_text ~* 'DISPOSITION[[:space:]]*:[[:space:]]*(2[.]5[[:space:]]*)?LIVE[[:space:]]+(GROUP[[:space:]]+)?TEXT' then '2.5 Live Group Text'
+        end original_live_status
+      from reporting.note_events n
+      where (n.lead_row_id=l.id or (n.lead_row_id is null and n.phone_key=l.phone_key))
+        and n.is_new_append is true
+        and n.note_date_eastern between l.first_live_date_eastern and l.first_live_date_eastern + 1
+        and n.note_text ~* '(BUYER|SELLER)[[:space:]]+FORM'
+        and n.note_text ~* 'ISA[[:space:]]*:'
+        and (n.note_text ~* 'DISPOSITION[[:space:]]*:[[:space:]]*(2[.]3[[:space:]]*)?LIVE[[:space:]]+TRANSFER'
+          or n.note_text ~* 'DISPOSITION[[:space:]]*:[[:space:]]*(2[.]4[[:space:]]*)?LIVE[[:space:]]+CALL[[:space:]]*BACK'
+          or n.note_text ~* 'DISPOSITION[[:space:]]*:[[:space:]]*(2[.]5[[:space:]]*)?LIVE[[:space:]]+(GROUP[[:space:]]+)?TEXT')
+      order by coalesce(n.note_created_at_utc,n.detected_at_utc) asc nulls last,n.note_sequence asc nulls last,n.id asc
+      limit 1
+    ) n on true
+    where (nullif(trim(coalesce(p_filters->>'status','')),'') is null
+        or n.original_live_status=p_filters->>'status')
+      and (nullif(trim(coalesce(p_filters->>'agent','')),'') is null
+        or lower(trim(coalesce(n.note_user_id,'')))=lower(trim(p_filters->>'agent'))
+        or report_api.normalize_agent(n.note_user_name)=report_api.normalize_agent(p_filters->>'agent')
+        or report_api.normalize_agent(split_part(n.note_user_email,'@',1))=report_api.normalize_agent(p_filters->>'agent'))
+  ), live_detail as materialized (
+    select l.*,
+      coalesce(nullif(trim(c.user_name),''),'Unknown') live_caller,
+      coalesce(nullif(trim(c.user_id),''),'') live_caller_id
+    from live_gated l
+    left join lateral (
+      select c.user_name,c.user_id
+      from reporting.call_events c
+      where (c.lead_id=l.id or (c.lead_id is null and c.phone_key=l.phone_key))
+        and coalesce(nullif(trim(c.call_type_id),''),'0') not in ('7','10')
+        and lower(trim(coalesce(c.call_direction,'outbound'))) <> 'inbound'
+        and c.call_date_eastern between l.first_live_date_eastern and l.gate_note_date
+        and (l.gate_note_at is null or c.call_timestamp <= l.gate_note_at + interval '1 hour')
+      order by (c.id=l.matched_call_event_id) desc,c.call_timestamp desc nulls last,c.id desc
+      limit 1
+    ) c on true
+  ), live_checked as materialized (
+    select d.*,
+      (nullif(d.note_owner_id,'') is not null and d.note_owner_id=d.live_caller_id)
+        or (report_api.normalize_agent(d.note_owner)=report_api.normalize_agent(d.live_caller)
+          and report_api.normalize_agent(d.note_owner) not in ('','unknown')) call_owner_match,
+      (report_api.normalize_agent(d.form_isa)=report_api.normalize_agent(d.note_owner)
+        or report_api.normalize_agent(d.form_isa)=report_api.normalize_agent(split_part(d.note_owner_email,'@',1)))
+        and report_api.normalize_agent(d.form_isa) not in ('','unknown') isa_owner_match
+    from live_detail d
+  ), live_agent_stats as (
+    select coalesce(nullif(note_owner_id,''),'email:'||lower(nullif(note_owner_email,'')),'name:'||report_api.normalize_agent(note_owner),'unknown') owner_key,
+      max(note_owner) agent,max(note_owner_id) agent_id,max(note_owner_email) agent_email,
+      count(*)::bigint live_leads,
+      count(*) filter (where original_live_status='2.3 Live Transfer')::bigint live_transfers,
+      count(*) filter (where original_live_status='2.4 Live Call Back')::bigint live_call_backs,
+      count(*) filter (where original_live_status='2.5 Live Group Text')::bigint live_texts,
+      count(*) filter (where call_owner_match)::bigint original_call_matches,
+      count(*) filter (where isa_owner_match)::bigint isa_matches,
+      count(*) filter (where call_owner_match and isa_owner_match)::bigint confirmed_ownership,
+      count(*) filter (where not coalesce(call_owner_match,false) or not coalesce(isa_owner_match,false))::bigint needs_review
+    from live_checked group by 1
   )
   select jsonb_build_object(
     'totals', jsonb_build_object(
@@ -394,6 +578,15 @@ begin
     ),
     'agents', coalesce((select jsonb_agg(to_jsonb(s) order by s.score desc, s.calls desc, s.user_name) from scored s), '[]'::jsonb),
     'note_authors', coalesce((select jsonb_agg(to_jsonb(n) order by n.notes desc, n.author) from note_authors n), '[]'::jsonb),
+    'live_ownership', coalesce((select jsonb_agg(to_jsonb(l) order by l.live_leads desc,l.agent) from live_agent_stats l), '[]'::jsonb),
+    'live_ownership_totals', jsonb_build_object(
+      'live_leads',coalesce((select count(*) from live_checked),0),
+      'live_transfers',coalesce((select count(*) from live_checked where original_live_status='2.3 Live Transfer'),0),
+      'live_call_backs',coalesce((select count(*) from live_checked where original_live_status='2.4 Live Call Back'),0),
+      'live_texts',coalesce((select count(*) from live_checked where original_live_status='2.5 Live Group Text'),0),
+      'confirmed_ownership',coalesce((select count(*) from live_checked where call_owner_match and isa_owner_match),0),
+      'needs_review',coalesce((select count(*) from live_checked where not coalesce(call_owner_match,false) or not coalesce(isa_owner_match,false)),0)
+    ),
     'generated_at', now()
   ) into v_result;
   return v_result;
@@ -416,10 +609,10 @@ begin
   perform report_api.validate_range(p_from, p_to);
   with selected as materialized (
     select l.* from reporting.leads l
-    where report_api.lead_matches(l,p_filters)
+    where (not v_has_filters or report_api.lead_matches(l,p_filters))
       and case when coalesce(p_filters->>'date_basis','activity')='created' then l.created_date_eastern else l.lead_date_eastern end between p_from and p_to
   ), page_rows as (
-    select l.id,l.first_name,l.last_name,l.phone,l.email,l.lead_status,l.lead_type,l.vendor,l.user_name,l.user_id,
+    select l.id,l.first_name,l.last_name,l.phone,l.email,l.lead_status,report_api.classified_lead_type(l) lead_type,l.vendor,l.user_name,l.user_id,
       l.city,l.property_state,l.property_zip,l.lead_date_eastern lead_date,l.created_date_eastern created_date,
       l.first_live_date_eastern first_live_date,l.live_email_sent,l.fub_id
     from selected l order by l.lead_date_eastern desc nulls last,l.id desc
@@ -446,7 +639,7 @@ begin
   perform report_api.assert_access();
   perform report_api.validate_range(p_from, p_to);
   with filtered_leads as materialized (
-    select l.id,l.phone_key from reporting.leads l where report_api.lead_matches(l,p_filters)
+    select l.id,l.phone_key from reporting.leads l where v_has_filters and report_api.lead_matches(l,p_filters)
   ), selected as materialized (
     select c.id,c.call_timestamp from reporting.call_events c
     where c.call_date_eastern between p_from and p_to
@@ -481,7 +674,8 @@ begin
       c.user_name,c.user_id,c.call_datetime_text call_date_time,c.call_date_eastern call_date,
       c.duration_seconds,c.call_status,c.call_type_id,
       case when trim(coalesce(c.call_type_id,'')) in ('7','10') then 'Inbound' else coalesce(nullif(c.call_direction,''),'Outbound') end direction,
-      coalesce(ld.lead_status,lp.lead_status) lead_status,coalesce(ld.lead_type,lp.lead_type,c.lead_type) lead_type,
+      coalesce(ld.lead_status,lp.lead_status) lead_status,
+      case when ld.id is not null then report_api.classified_lead_type(ld) when lp.id is not null then report_api.classified_lead_type(lp) else coalesce(c.lead_type,'Unknown') end lead_type,
       coalesce(ld.vendor,lp.vendor) vendor,c.call_uuid,c.recording_status,c.recording_url,
       c.ai_analysis_status,c.ai_agent_score,c.ai_summary,c.ai_status_matches,c.ai_note_matches
     from page_ids p join reporting.call_events c on c.id=p.id
@@ -505,47 +699,65 @@ stable
 security definer
 set search_path = ''
 as $$
-declare v_result jsonb; v_page integer := greatest(coalesce(p_page,1),1); v_size integer := least(greatest(coalesce(p_page_size,50),10),100); v_has_filters boolean := report_api.has_lead_filters(p_filters);
+declare v_result jsonb; v_page integer := greatest(coalesce(p_page,1),1); v_size integer := least(greatest(coalesce(p_page_size,25),10),25); v_has_filters boolean := report_api.has_lead_filters(p_filters);
 begin
   perform report_api.assert_access();
   perform report_api.validate_range(p_from, p_to);
-  with filtered_leads as materialized (
-    select l.id,l.phone_key from reporting.leads l where report_api.lead_matches(l,p_filters)
-  ), selected as materialized (
-    select n.id,n.note_created_at_utc from reporting.note_events n
-    where n.note_date_eastern between p_from and p_to and n.is_new_append is true
-      and (
-        not v_has_filters
-        or (n.lead_row_id is not null and n.lead_row_id in (select l.id from filtered_leads l))
-        or (n.lead_row_id is null and n.phone_key in (select l.phone_key from filtered_leads l where l.phone_key is not null))
-      )
+  with selected as materialized (
+    select l.id,l.lead_date_eastern,l.created_date_eastern
+    from reporting.leads l
+    where (not v_has_filters or report_api.lead_matches(l,p_filters))
+      and case when coalesce(p_filters->>'date_basis','activity')='created' then l.created_date_eastern else l.lead_date_eastern end between p_from and p_to
+      and nullif(trim(coalesce(l.all_notes,l.note,'')),'') is not null
   ), page_ids as (
-    select n.id from selected n order by n.note_created_at_utc desc nulls last,n.id desc limit v_size offset (v_page-1)*v_size
+    select s.id from selected s
+    order by (case when coalesce(p_filters->>'date_basis','activity')='created' then s.created_date_eastern else s.lead_date_eastern end) desc nulls last,s.id desc
+    limit v_size offset (v_page-1)*v_size
   ), page_rows as (
-    select n.id,n.ricochet_note_id,n.lead_row_id,n.phone,n.phone_key,n.note_text,n.note_user_name,n.note_user_email,
-      coalesce(n.note_created_at_utc,n.detected_at_utc) note_created_at,n.note_date_eastern note_date,
-      n.matched_call_event_id,n.match_method,n.match_confidence,
-      coalesce(ld.first_name,lp.first_name) first_name,coalesce(ld.last_name,lp.last_name) last_name,
-      coalesce(ld.lead_status,lp.lead_status) lead_status,coalesce(ld.lead_type,lp.lead_type) lead_type,
+    select l.id,l.id lead_row_id,l.phone,l.phone_key,
+      coalesce(nullif(trim(l.all_notes),''),l.note) note_text,l.note latest_note,
+      l.user_name note_user_name,l.user_email note_user_email,
+      coalesce(latest_note.note_created_at_utc,latest_note.detected_at_utc) note_created_at,l.lead_date_eastern note_date,
+      latest_note.matched_call_event_id,latest_note.match_method,latest_note.match_confidence,
+      l.first_name,l.last_name,l.lead_status,report_api.classified_lead_type(l) lead_type,
+      coalesce(note_history.items,'[]'::jsonb) note_items,
       coalesce(recordings.items,'[]'::jsonb) recordings
-    from page_ids p join reporting.note_events n on n.id=p.id
-    left join reporting.leads ld on ld.id=n.lead_row_id
-    left join lateral (select l.* from reporting.leads l where n.lead_row_id is null and l.phone_key=n.phone_key order by l.id desc limit 1) lp on true
+    from page_ids p join reporting.leads l on l.id=p.id
+    left join lateral (
+      select n.note_created_at_utc,n.detected_at_utc,n.matched_call_event_id,n.match_method,n.match_confidence
+      from reporting.note_events n
+      where (n.lead_row_id=l.id or (n.lead_row_id is null and n.phone_key=l.phone_key))
+      order by coalesce(n.note_created_at_utc,n.detected_at_utc) desc nulls last,n.id desc limit 1
+    ) latest_note on true
+    left join lateral (
+      select jsonb_agg(to_jsonb(h) order by h.note_sequence desc nulls last,h.note_time desc nulls last,h.id desc) items
+      from (
+        select n.id,n.ricochet_note_id,n.note_sequence,n.note_text,n.note_user_name,n.note_user_id,n.note_user_email,
+          coalesce(n.note_created_at_utc,n.detected_at_utc) note_time,n.is_new_append,n.match_method,n.match_confidence,
+          c.id call_id,c.call_uuid,c.call_datetime_text call_date_time,c.duration_seconds,c.user_name call_user_name,
+          case when trim(coalesce(c.call_type_id,'')) in ('7','10') then 'Inbound' else coalesce(nullif(c.call_direction,''),'Outbound') end direction,
+          c.recording_status
+        from reporting.note_events n
+        left join reporting.call_events c on c.id=n.matched_call_event_id
+        where n.lead_row_id=l.id or (n.lead_row_id is null and n.phone_key=l.phone_key)
+        order by n.note_sequence desc nulls last,coalesce(n.note_created_at_utc,n.detected_at_utc) desc nulls last,n.id desc
+        limit 50
+      ) h
+    ) note_history on true
     left join lateral (
       select jsonb_agg(to_jsonb(r) order by r.exact_match desc,r.sort_at desc nulls last,r.id desc) items from (
         select c.id,c.call_uuid,c.call_datetime_text call_date_time,c.call_timestamp sort_at,c.call_date_eastern call_date,
           c.duration_seconds,c.user_name,c.user_id,
           case when trim(coalesce(c.call_type_id,'')) in ('7','10') then 'Inbound' else coalesce(nullif(c.call_direction,''),'Outbound') end direction,
-          c.recording_status,(c.id=n.matched_call_event_id) exact_match
+          c.recording_status,(c.id=latest_note.matched_call_event_id) exact_match
         from reporting.call_events c
         where nullif(trim(coalesce(c.call_uuid,'')),'') is not null
-          and ((n.lead_row_id is not null and c.lead_id=n.lead_row_id)
-            or (n.lead_row_id is null and c.phone_key=n.phone_key))
-        order by (c.id=n.matched_call_event_id) desc,c.call_timestamp desc nulls last,c.id desc
+          and (c.lead_id=l.id or (c.lead_id is null and c.phone_key=l.phone_key))
+        order by (c.id=latest_note.matched_call_event_id) desc,c.call_timestamp desc nulls last,c.id desc
         limit 25
       ) r
     ) recordings on true
-    order by n.note_created_at_utc desc nulls last,n.id desc
+    order by l.lead_date_eastern desc nulls last,l.id desc
   )
   select jsonb_build_object('total',(select count(*) from selected),'page',v_page,'page_size',v_size,
     'rows',coalesce((select jsonb_agg(to_jsonb(r)) from page_rows r),'[]'::jsonb),'generated_at',now()) into v_result;
@@ -568,7 +780,7 @@ begin
   perform report_api.assert_access();
   perform report_api.validate_range(p_from, p_to);
   with filtered_leads as materialized (
-    select l.id,l.phone_key from reporting.leads l where report_api.lead_matches(l,p_filters)
+    select l.id,l.phone_key from reporting.leads l where v_has_filters and report_api.lead_matches(l,p_filters)
   ), selected as materialized (
     select c.id,c.call_timestamp,c.ai_analysis_status,c.ai_status_matches,c.ai_note_matches
     from reporting.call_events c where c.call_date_eastern between p_from and p_to
@@ -720,6 +932,7 @@ create index if not exists reporting_leads_live_email_idx on reporting.leads (li
 create index if not exists reporting_leads_city_idx on reporting.leads (lower(trim(city)));
 create index if not exists reporting_leads_zip_idx on reporting.leads (property_zip);
 create index if not exists reporting_leads_first_live_sent_idx on reporting.leads (first_live_date_eastern) where live_email_sent is true;
+create index if not exists reporting_leads_status_lower_idx on reporting.leads (lower(trim(lead_status)));
 create index if not exists reporting_calls_date_id_idx on reporting.call_events (call_date_eastern,id desc);
 create index if not exists reporting_calls_lead_date_idx on reporting.call_events (lead_id,call_date_eastern,id desc);
 create index if not exists reporting_calls_phone_date_idx on reporting.call_events (phone_key,call_date_eastern,id desc) where lead_id is null;
@@ -727,6 +940,8 @@ create index if not exists reporting_calls_uuid_idx on reporting.call_events (ca
 create index if not exists reporting_notes_date_id_idx on reporting.note_events (note_date_eastern,id desc) where is_new_append is true;
 create index if not exists reporting_notes_lead_date_idx on reporting.note_events (lead_row_id,note_date_eastern,id desc) where is_new_append is true;
 create index if not exists reporting_notes_phone_date_idx on reporting.note_events (phone_key,note_date_eastern,id desc) where lead_row_id is null and is_new_append is true;
+create index if not exists reporting_notes_lead_sequence_idx on reporting.note_events (lead_row_id,note_sequence desc,id desc);
+create index if not exists reporting_notes_phone_sequence_idx on reporting.note_events (phone_key,note_sequence desc,id desc) where lead_row_id is null;
 
 -- Deliberately preserve every existing reporting/AI schema and table grant during the
 -- parallel testing period. The new website itself uses only the protected RPC functions.
