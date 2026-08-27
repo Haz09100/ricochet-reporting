@@ -491,13 +491,24 @@ begin
         or (n.lead_row_id is null and n.phone_key in (select l.phone_key from filtered_leads l where l.phone_key is not null))
       )
     group by 1 order by notes desc
-  ), live_candidates as materialized (
-    select l.id,l.phone_key,l.first_live_date_eastern
+  ), current_live_activity as materialized (
+    select l.id,l.first_live_date_eastern
+    from reporting.leads l
+    where case when coalesce(p_filters->>'date_basis','activity')='created'
+        then l.created_date_eastern else l.lead_date_eastern end between p_from and p_to
+      and (lower(trim(coalesce(l.lead_status,''))) like '%live%transfer%'
+        or lower(trim(coalesce(l.lead_status,''))) like '%live%call%back%'
+        or lower(trim(coalesce(l.lead_status,''))) like '%live%group%text%')
+      and (not v_has_filters or report_api.lead_matches(l,p_filters))
+  ), first_live_candidates as materialized (
+    select l.id,l.phone_key,l.first_live_date_eastern,l.live_email_sent
     from reporting.leads l
     where l.first_live_date_eastern between p_from and p_to
-      and l.live_email_sent is true
       and (not v_has_filters or report_api.lead_matches(l,p_filters - 'agent' - 'status'))
-  ), live_gated as materialized (
+  ), live_candidates as materialized (
+    select l.id,l.phone_key,l.first_live_date_eastern
+    from first_live_candidates l where l.live_email_sent is true
+  ), live_gated_all as materialized (
     select l.id,l.phone_key,l.first_live_date_eastern,
       n.original_live_status,n.gate_note_at,n.gate_note_date,n.matched_call_event_id,
       report_api.form_isa(n.note_text) form_isa,
@@ -525,6 +536,8 @@ begin
       order by coalesce(n.note_created_at_utc,n.detected_at_utc) asc nulls last,n.note_sequence asc nulls last,n.id asc
       limit 1
     ) n on true
+  ), live_gated as materialized (
+    select n.* from live_gated_all n
     where (nullif(trim(coalesce(p_filters->>'status','')),'') is null
         or n.original_live_status=p_filters->>'status')
       and (nullif(trim(coalesce(p_filters->>'agent','')),'') is null
@@ -539,11 +552,10 @@ begin
     left join lateral (
       select c.user_name,c.user_id
       from reporting.call_events c
-      where (c.lead_id=l.id or (c.lead_id is null and c.phone_key=l.phone_key))
-        and coalesce(nullif(trim(c.call_type_id),''),'0') not in ('7','10')
-        and lower(trim(coalesce(c.call_direction,'outbound'))) <> 'inbound'
-        and c.call_date_eastern between l.first_live_date_eastern and l.gate_note_date
-        and (l.gate_note_at is null or c.call_timestamp <= l.gate_note_at + interval '1 hour')
+      where c.id=l.matched_call_event_id
+        or ((c.lead_id=l.id or (c.lead_id is null and c.phone_key=l.phone_key))
+          and c.call_date_eastern between l.first_live_date_eastern and l.gate_note_date
+          and (l.gate_note_at is null or c.call_timestamp <= l.gate_note_at + interval '1 hour'))
       order by (c.id=l.matched_call_event_id) desc,c.call_timestamp desc nulls last,c.id desc
       limit 1
     ) c on true
@@ -565,8 +577,8 @@ begin
       count(*) filter (where original_live_status='2.5 Live Group Text')::bigint live_texts,
       count(*) filter (where call_owner_match)::bigint original_call_matches,
       count(*) filter (where isa_owner_match)::bigint isa_matches,
-      count(*) filter (where call_owner_match and isa_owner_match)::bigint confirmed_ownership,
-      count(*) filter (where not coalesce(call_owner_match,false) or not coalesce(isa_owner_match,false))::bigint needs_review
+      count(*) filter (where isa_owner_match)::bigint confirmed_ownership,
+      count(*) filter (where not coalesce(isa_owner_match,false))::bigint needs_review
     from live_checked group by 1
   )
   select jsonb_build_object(
@@ -584,8 +596,18 @@ begin
       'live_transfers',coalesce((select count(*) from live_checked where original_live_status='2.3 Live Transfer'),0),
       'live_call_backs',coalesce((select count(*) from live_checked where original_live_status='2.4 Live Call Back'),0),
       'live_texts',coalesce((select count(*) from live_checked where original_live_status='2.5 Live Group Text'),0),
-      'confirmed_ownership',coalesce((select count(*) from live_checked where call_owner_match and isa_owner_match),0),
-      'needs_review',coalesce((select count(*) from live_checked where not coalesce(call_owner_match,false) or not coalesce(isa_owner_match,false)),0)
+      'confirmed_ownership',coalesce((select count(*) from live_checked where isa_owner_match),0),
+      'needs_review',coalesce((select count(*) from live_checked where not coalesce(isa_owner_match,false)),0)
+    ),
+    'live_ownership_reconciliation', jsonb_build_object(
+      'current_live_activity',coalesce((select count(*) from current_live_activity),0),
+      'prior_live_reworked',coalesce((select count(*) from current_live_activity where first_live_date_eastern < p_from),0),
+      'first_live_in_range',coalesce((select count(*) from first_live_candidates),0),
+      'missing_live_email',coalesce((select count(*) from first_live_candidates where coalesce(live_email_sent,false) is false),0),
+      'email_gate_passed',coalesce((select count(*) from live_candidates),0),
+      'missing_formal_note',greatest(coalesce((select count(*) from live_candidates),0)-coalesce((select count(*) from live_gated_all),0),0),
+      'qualified_before_owner_filter',coalesce((select count(*) from live_gated_all),0),
+      'selected_qualified',coalesce((select count(*) from live_checked),0)
     ),
     'generated_at', now()
   ) into v_result;
