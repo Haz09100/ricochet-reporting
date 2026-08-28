@@ -84,6 +84,20 @@ export async function loadCsvCallDetails(leadIds) {
   return Array.isArray(data) ? data : [];
 }
 
+export async function setLiveBonusDecision({ leadId, decision, agentId = "", agentName = "", agentEmail = "", reason }) {
+  const { data, error } = await requiredClient().rpc("dashboard_set_live_bonus_decision", {
+    p_lead_id: Number(leadId),
+    p_decision: decision,
+    p_agent_id: agentId || null,
+    p_agent_name: agentName || null,
+    p_agent_email: agentEmail || null,
+    p_reason: reason,
+  });
+  if (error) throw new Error(error.message || "Could not save the bonus decision.");
+  reportCache.clear();
+  return data || {};
+}
+
 export async function bridgeRequest(path, options = {}) {
   if (!config.workerUrl) throw new Error("The private recording/AI bridge URL is not configured.");
   const token = await currentAccessToken();
