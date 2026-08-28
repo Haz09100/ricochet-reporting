@@ -98,6 +98,12 @@ export async function setLiveBonusDecision({ leadId, decision, agentId = "", age
   return data || {};
 }
 
+export async function loadLiveBonusReview(leadId) {
+  const { data, error } = await requiredClient().rpc("dashboard_live_bonus_review", { p_lead_id: Number(leadId) });
+  if (error) throw new Error(error.message || "Could not load the live-lead review.");
+  return data || {};
+}
+
 export async function bridgeRequest(path, options = {}) {
   if (!config.workerUrl) throw new Error("The private recording/AI bridge URL is not configured.");
   const token = await currentAccessToken();
