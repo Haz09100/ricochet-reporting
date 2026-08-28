@@ -17,6 +17,27 @@ create table if not exists public.report_users (
   created_at timestamptz not null default now()
 );
 
+-- Immutable manager decisions for monthly live-lead bonuses. A new row is
+-- appended for every approval, retraction, or reset so prior payroll decisions
+-- are never silently overwritten.
+create table if not exists public.live_bonus_decisions (
+  id bigint generated always as identity primary key,
+  lead_id bigint not null,
+  decision text not null check (decision in ('approved','retracted','reset')),
+  credited_agent_id text,
+  credited_agent_name text,
+  credited_agent_email text,
+  reason text not null check (length(trim(reason)) >= 3),
+  decided_by uuid not null references auth.users(id),
+  decided_at timestamptz not null default now()
+);
+
+create index if not exists live_bonus_decisions_lead_latest_idx
+  on public.live_bonus_decisions (lead_id, decided_at desc, id desc);
+
+alter table public.live_bonus_decisions enable row level security;
+revoke all on table public.live_bonus_decisions from public, anon, authenticated;
+
 alter table public.report_users enable row level security;
 revoke all on table public.report_users from public, anon, authenticated;
 grant select on table public.report_users to authenticated;
@@ -51,6 +72,67 @@ begin
   ) then
     raise exception 'This user is not authorized for Ricochet reporting.' using errcode = '42501';
   end if;
+end;
+$$;
+
+create or replace function report_api.assert_manager()
+returns void
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+begin
+  perform report_api.assert_access();
+  if not exists (
+    select 1 from public.report_users u
+    where u.user_id = (select auth.uid())
+      and u.active is true
+      and u.role in ('manager','admin')
+  ) then
+    raise exception 'Manager or admin access is required.' using errcode = '42501';
+  end if;
+end;
+$$;
+
+create or replace function public.dashboard_set_live_bonus_decision(
+  p_lead_id bigint,
+  p_decision text,
+  p_agent_id text default null,
+  p_agent_name text default null,
+  p_agent_email text default null,
+  p_reason text default null
+)
+returns jsonb
+language plpgsql
+volatile
+security definer
+set search_path = ''
+as $$
+declare v_decision text := lower(trim(coalesce(p_decision,''))); v_id bigint;
+begin
+  perform report_api.assert_manager();
+  if p_lead_id is null or not exists (select 1 from reporting.leads l where l.id=p_lead_id) then
+    raise exception 'A valid lead ID is required.' using errcode='22023';
+  end if;
+  if v_decision not in ('approved','retracted','reset') then
+    raise exception 'Decision must be approved, retracted, or reset.' using errcode='22023';
+  end if;
+  if length(trim(coalesce(p_reason,''))) < 3 then
+    raise exception 'A short reason is required for the audit history.' using errcode='22023';
+  end if;
+  if v_decision='approved' and nullif(trim(coalesce(p_agent_id,p_agent_name,p_agent_email,'')),'') is null then
+    raise exception 'Choose the agent who receives the bonus.' using errcode='22023';
+  end if;
+
+  insert into public.live_bonus_decisions (
+    lead_id,decision,credited_agent_id,credited_agent_name,credited_agent_email,reason,decided_by
+  ) values (
+    p_lead_id,v_decision,nullif(trim(p_agent_id),''),nullif(trim(p_agent_name),''),
+    nullif(trim(p_agent_email),''),trim(p_reason),(select auth.uid())
+  ) returning id into v_id;
+
+  return jsonb_build_object('success',true,'decision_id',v_id,'lead_id',p_lead_id,'decision',v_decision);
 end;
 $$;
 
@@ -127,6 +209,27 @@ as $$
   select report_api.form_isa(coalesce(nullif(trim(p_lead.note),''),nullif(trim(p_lead.all_notes),''),''))
 $$;
 
+create or replace function report_api.form_date(p_value text)
+returns date
+language sql
+immutable
+set search_path = ''
+as $$
+  with extracted as (
+    select
+      substring(coalesce(p_value,'') from '(?i)DATE[[:space:]]*:[[:space:]]*((?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)[[:space:]]+[0-9]{1,2},[[:space:]]+[0-9]{4})') named_date,
+      substring(coalesce(p_value,'') from '(?i)DATE[[:space:]]*:[[:space:]]*([0-9]{1,2}/[0-9]{1,2}/[0-9]{4})') numeric_date,
+      substring(coalesce(p_value,'') from '(?i)DATE[[:space:]]*:[[:space:]]*([0-9]{4}-[0-9]{1,2}-[0-9]{1,2})') iso_date
+  )
+  select case
+    when named_date is not null then to_date(named_date,'Mon DD, YYYY')
+    when numeric_date is not null then to_date(numeric_date,'MM/DD/YYYY')
+    when iso_date is not null then to_date(iso_date,'YYYY-MM-DD')
+    else null
+  end
+  from extracted
+$$;
+
 create or replace function report_api.appointment_type(p_lead reporting.leads)
 returns text
 language sql
@@ -195,42 +298,45 @@ stable
 set search_path = ''
 as $$
   select
-    (nullif(trim(coalesce(p_filters->>'status', '')), '') is null
-      or p_lead.lead_status = p_filters->>'status')
-    and (nullif(trim(coalesce(p_filters->>'agent', '')), '') is null
-      or lower(trim(coalesce(p_lead.user_id, ''))) = lower(trim(p_filters->>'agent'))
-      or lower(trim(coalesce(p_lead.user_name, ''))) = lower(trim(p_filters->>'agent')))
-    and (nullif(trim(coalesce(p_filters->>'vendor', '')), '') is null
-      or lower(trim(coalesce(p_lead.vendor, ''))) = lower(trim(p_filters->>'vendor')))
-    and (nullif(trim(coalesce(p_filters->>'lead_type', '')), '') is null
-      or report_api.classified_lead_type(p_lead) = p_filters->>'lead_type')
-    and (nullif(trim(coalesce(p_filters->>'state', '')), '') is null
-      or upper(trim(coalesce(p_lead.property_state, ''))) = upper(trim(p_filters->>'state')))
-    and (nullif(trim(coalesce(p_filters->>'city', '')), '') is null
-      or lower(trim(coalesce(p_lead.city, ''))) = lower(trim(p_filters->>'city')))
-    and (nullif(trim(coalesce(p_filters->>'appointment_type', '')), '') is null
-      or report_api.appointment_type(p_lead) = p_filters->>'appointment_type')
-    and (nullif(trim(coalesce(p_filters->>'source_description', '')), '') is null
-      or lower(trim(coalesce(p_lead.source_lead_description, ''))) = lower(trim(p_filters->>'source_description')))
-    and (coalesce(p_filters->>'email_status', '') <> 'sent' or p_lead.live_email_sent is true)
-    and (coalesce(p_filters->>'email_status', '') <> 'not_sent' or coalesce(p_lead.live_email_sent, false) is false)
+    (nullif(trim(coalesce(jsonb_extract_path_text(p_filters,'status'),'')),'') is null
+      or (p_lead).lead_status = jsonb_extract_path_text(p_filters,'status'))
+    and (nullif(trim(coalesce(jsonb_extract_path_text(p_filters,'agent'),'')),'') is null
+      or lower(trim(coalesce((p_lead).user_id,''))) = lower(trim(jsonb_extract_path_text(p_filters,'agent')))
+      or lower(trim(coalesce((p_lead).user_name,''))) = lower(trim(jsonb_extract_path_text(p_filters,'agent'))))
+    and (nullif(trim(coalesce(jsonb_extract_path_text(p_filters,'vendor'),'')),'') is null
+      or lower(trim(coalesce((p_lead).vendor,''))) = lower(trim(jsonb_extract_path_text(p_filters,'vendor'))))
+    and (nullif(trim(coalesce(jsonb_extract_path_text(p_filters,'lead_type'),'')),'') is null
+      or report_api.classified_lead_type(p_lead) = jsonb_extract_path_text(p_filters,'lead_type'))
+    and (nullif(trim(coalesce(jsonb_extract_path_text(p_filters,'state'),'')),'') is null
+      or upper(trim(coalesce((p_lead).property_state,''))) = upper(trim(jsonb_extract_path_text(p_filters,'state'))))
+    and (nullif(trim(coalesce(jsonb_extract_path_text(p_filters,'city'),'')),'') is null
+      or lower(trim(coalesce((p_lead).city,''))) = lower(trim(jsonb_extract_path_text(p_filters,'city'))))
+    and (nullif(trim(coalesce(jsonb_extract_path_text(p_filters,'appointment_type'),'')),'') is null
+      or report_api.appointment_type(p_lead) = jsonb_extract_path_text(p_filters,'appointment_type'))
+    and (nullif(trim(coalesce(jsonb_extract_path_text(p_filters,'source_description'),'')),'') is null
+      or lower(trim(coalesce((p_lead).source_lead_description,''))) = lower(trim(jsonb_extract_path_text(p_filters,'source_description'))))
+    and (coalesce(jsonb_extract_path_text(p_filters,'email_status'),'') <> 'sent' or (p_lead).live_email_sent is true)
+    and (coalesce(jsonb_extract_path_text(p_filters,'email_status'),'') <> 'not_sent' or coalesce((p_lead).live_email_sent,false) is false)
     and (
-      nullif(trim(coalesce(p_filters->>'address_quality', '')), '') is null
-      or (p_filters->>'address_quality' = 'missing_city_or_zip' and
-        (nullif(trim(coalesce(p_lead.city,'')), '') is null or coalesce(p_lead.property_zip,'') !~ '^[0-9]{5}'))
-      or (p_filters->>'address_quality' = 'missing_city' and nullif(trim(coalesce(p_lead.city,'')), '') is null)
-      or (p_filters->>'address_quality' = 'missing_zip' and coalesce(p_lead.property_zip,'') !~ '^[0-9]{5}')
-      or (p_filters->>'address_quality' = 'complete' and nullif(trim(coalesce(p_lead.city,'')), '') is not null
-        and coalesce(p_lead.property_zip,'') ~ '^[0-9]{5}')
+      nullif(trim(coalesce(jsonb_extract_path_text(p_filters,'address_quality'),'')),'') is null
+      or (jsonb_extract_path_text(p_filters,'address_quality')='missing_city_or_zip'
+        and (nullif(trim(coalesce((p_lead).city,'')), '') is null or coalesce((p_lead).property_zip,'') !~ '^[0-9]{5}'))
+      or (jsonb_extract_path_text(p_filters,'address_quality')='missing_city'
+        and nullif(trim(coalesce((p_lead).city,'')), '') is null)
+      or (jsonb_extract_path_text(p_filters,'address_quality')='missing_zip'
+        and coalesce((p_lead).property_zip,'') !~ '^[0-9]{5}')
+      or (jsonb_extract_path_text(p_filters,'address_quality')='complete'
+        and nullif(trim(coalesce((p_lead).city,'')), '') is not null
+        and coalesce((p_lead).property_zip,'') ~ '^[0-9]{5}')
     )
     and (
-      nullif(trim(coalesce(p_filters->>'search', '')), '') is null
-      or lower(concat_ws(' ', p_lead.first_name, p_lead.last_name)) like '%' || lower(trim(p_filters->>'search')) || '%'
-      or lower(coalesce(p_lead.email, '')) like '%' || lower(trim(p_filters->>'search')) || '%'
-      or (report_api.normalize_phone(p_filters->>'search') <> ''
-        and report_api.normalize_phone(p_lead.phone) like '%' || report_api.normalize_phone(p_filters->>'search') || '%')
-      or p_lead.id::text = trim(p_filters->>'search')
-      or lower(coalesce(p_lead.fub_id::text, '')) = lower(trim(p_filters->>'search'))
+      nullif(trim(coalesce(jsonb_extract_path_text(p_filters,'search'),'')),'') is null
+      or lower(concat_ws(' ',(p_lead).first_name,(p_lead).last_name)) like '%' || lower(trim(jsonb_extract_path_text(p_filters,'search'))) || '%'
+      or lower(coalesce((p_lead).email,'')) like '%' || lower(trim(jsonb_extract_path_text(p_filters,'search'))) || '%'
+      or (report_api.normalize_phone(jsonb_extract_path_text(p_filters,'search')) <> ''
+        and report_api.normalize_phone((p_lead).phone) like '%' || report_api.normalize_phone(jsonb_extract_path_text(p_filters,'search')) || '%')
+      or (p_lead).id::text = trim(jsonb_extract_path_text(p_filters,'search'))
+      or lower(coalesce((p_lead).fub_id::text,'')) = lower(trim(jsonb_extract_path_text(p_filters,'search')))
     )
 $$;
 
@@ -508,42 +614,57 @@ begin
   ), live_candidates as materialized (
     select l.id,l.phone_key,l.first_live_date_eastern
     from first_live_candidates l where l.live_email_sent is true
-  ), live_gated_all as materialized (
+  ), live_evidence_all as materialized (
     select l.id,l.phone_key,l.first_live_date_eastern,
-      n.original_live_status,n.gate_note_at,n.gate_note_date,n.matched_call_event_id,
+      n.original_live_status,n.gate_note_at,n.gate_note_date,n.form_note_date,n.matched_call_event_id,
       report_api.form_isa(n.note_text) form_isa,
       coalesce(nullif(trim(n.note_user_name),''),nullif(trim(split_part(n.note_user_email,'@',1)),''), 'Unknown') note_owner,
       coalesce(nullif(trim(n.note_user_id),''),'') note_owner_id,
       coalesce(nullif(trim(n.note_user_email),''),'') note_owner_email
     from live_candidates l
-    join lateral (
+    left join lateral (
       select n.note_user_name,n.note_user_id,n.note_user_email,n.note_text,n.matched_call_event_id,
         coalesce(n.note_created_at_utc,n.detected_at_utc) gate_note_at,n.note_date_eastern gate_note_date,
+        report_api.form_date(n.note_text) form_note_date,
         case
-          when n.note_text ~* 'DISPOSITION[[:space:]]*:[[:space:]]*(2[.]3[[:space:]]*)?LIVE[[:space:]]+TRANSFER' then '2.3 Live Transfer'
-          when n.note_text ~* 'DISPOSITION[[:space:]]*:[[:space:]]*(2[.]4[[:space:]]*)?LIVE[[:space:]]+CALL[[:space:]]*BACK' then '2.4 Live Call Back'
-          when n.note_text ~* 'DISPOSITION[[:space:]]*:[[:space:]]*(2[.]5[[:space:]]*)?LIVE[[:space:]]+(GROUP[[:space:]]+)?TEXT' then '2.5 Live Group Text'
+          when n.note_text ~* 'DISPOSITION[[:space:]]*:[[:space:]]*(2[.]3[[:space:]-]*)?LIVE[[:space:]]+(LEAD[[:space:]]+)?TRANSFER' then '2.3 Live Transfer'
+          when n.note_text ~* 'DISPOSITION[[:space:]]*:[[:space:]]*(2[.]4[[:space:]-]*)?LIVE[[:space:]]+CALL[[:space:]-]*BACK' then '2.4 Live Call Back'
+          when n.note_text ~* 'DISPOSITION[[:space:]]*:[[:space:]]*(2[.]5[[:space:]-]*)?LIVE[[:space:]]+(GROUP[[:space:]]+)?TEXT' then '2.5 Live Group Text'
         end original_live_status
       from reporting.note_events n
       where (n.lead_row_id=l.id or (n.lead_row_id is null and n.phone_key=l.phone_key))
-        and n.is_new_append is true
-        and n.note_date_eastern between l.first_live_date_eastern and l.first_live_date_eastern + 1
-        and n.note_text ~* '(BUYER|SELLER)[[:space:]]+FORM'
+        -- Webhook order is not reliable. Accept the qualifying formal note on
+        -- either adjacent calendar day, whether it arrived before or after
+        -- the first live status. Status-event actors (including admins) never
+        -- determine ownership; the formal-note owner and form ISA do.
+        and (
+          report_api.form_date(n.note_text) between l.first_live_date_eastern - 1 and l.first_live_date_eastern + 1
+          or (report_api.form_date(n.note_text) is null
+            and n.note_date_eastern between l.first_live_date_eastern - 1 and l.first_live_date_eastern + 1)
+        )
+        and (n.note_text ~* '(BUYER|SELLER|UYER|ELLER)[[:space:]]+FORM'
+          or (n.note_text ~* 'LEAD[[:space:]]*:' and n.note_text ~* 'DATE[[:space:]]*:'
+            and n.note_text ~* 'ISA[[:space:]]*:' and n.note_text ~* 'DISPOSITION[[:space:]]*:'))
         and n.note_text ~* 'ISA[[:space:]]*:'
-        and (n.note_text ~* 'DISPOSITION[[:space:]]*:[[:space:]]*(2[.]3[[:space:]]*)?LIVE[[:space:]]+TRANSFER'
-          or n.note_text ~* 'DISPOSITION[[:space:]]*:[[:space:]]*(2[.]4[[:space:]]*)?LIVE[[:space:]]+CALL[[:space:]]*BACK'
-          or n.note_text ~* 'DISPOSITION[[:space:]]*:[[:space:]]*(2[.]5[[:space:]]*)?LIVE[[:space:]]+(GROUP[[:space:]]+)?TEXT')
-      order by coalesce(n.note_created_at_utc,n.detected_at_utc) asc nulls last,n.note_sequence asc nulls last,n.id asc
+        and (n.note_text ~* 'DISPOSITION[[:space:]]*:[[:space:]]*(2[.]3[[:space:]-]*)?LIVE[[:space:]]+(LEAD[[:space:]]+)?TRANSFER'
+          or n.note_text ~* 'DISPOSITION[[:space:]]*:[[:space:]]*(2[.]4[[:space:]-]*)?LIVE[[:space:]]+CALL[[:space:]-]*BACK'
+          or n.note_text ~* 'DISPOSITION[[:space:]]*:[[:space:]]*(2[.]5[[:space:]-]*)?LIVE[[:space:]]+(GROUP[[:space:]]+)?TEXT')
+      order by
+        case when report_api.form_date(n.note_text)=l.first_live_date_eastern then 0
+          when report_api.form_date(n.note_text) is not null then 1 else 2 end,
+        coalesce(n.note_created_at_utc,n.detected_at_utc) asc nulls last,n.note_sequence asc nulls last,n.id asc
       limit 1
     ) n on true
+  ), live_gated_all as materialized (
+    select e.* from live_evidence_all e where e.original_live_status is not null
   ), live_gated as materialized (
     select n.* from live_gated_all n
     where (nullif(trim(coalesce(p_filters->>'status','')),'') is null
         or n.original_live_status=p_filters->>'status')
       and (nullif(trim(coalesce(p_filters->>'agent','')),'') is null
-        or lower(trim(coalesce(n.note_user_id,'')))=lower(trim(p_filters->>'agent'))
-        or report_api.normalize_agent(n.note_user_name)=report_api.normalize_agent(p_filters->>'agent')
-        or report_api.normalize_agent(split_part(n.note_user_email,'@',1))=report_api.normalize_agent(p_filters->>'agent'))
+        or lower(trim(coalesce(n.note_owner_id,'')))=lower(trim(p_filters->>'agent'))
+        or report_api.normalize_agent(n.note_owner)=report_api.normalize_agent(p_filters->>'agent')
+        or report_api.normalize_agent(split_part(n.note_owner_email,'@',1))=report_api.normalize_agent(p_filters->>'agent'))
   ), live_detail as materialized (
     select l.*,
       coalesce(nullif(trim(c.user_name),''),'Unknown') live_caller,
@@ -580,8 +701,72 @@ begin
       count(*) filter (where isa_owner_match)::bigint confirmed_ownership,
       count(*) filter (where not coalesce(isa_owner_match,false))::bigint needs_review
     from live_checked group by 1
+  ), bonus_evidence as materialized (
+    select e.*,
+      concat_ws(' ',nullif(trim(rl.first_name),''),nullif(trim(rl.last_name),'')) lead_name,
+      rl.lead_status current_lead_status,
+      (report_api.normalize_agent(e.form_isa)=report_api.normalize_agent(e.note_owner)
+        or report_api.normalize_agent(e.form_isa)=report_api.normalize_agent(split_part(e.note_owner_email,'@',1)))
+        and report_api.normalize_agent(e.form_isa) not in ('','unknown') isa_owner_match,
+      d.decision manual_decision,d.credited_agent_id manual_agent_id,
+      d.credited_agent_name manual_agent_name,d.credited_agent_email manual_agent_email,
+      d.reason decision_reason,d.decided_at,d.decided_by
+    from live_evidence_all e
+    join reporting.leads rl on rl.id=e.id
+    left join lateral (
+      select x.decision,x.credited_agent_id,x.credited_agent_name,x.credited_agent_email,
+        x.reason,x.decided_at,x.decided_by
+      from public.live_bonus_decisions x
+      where x.lead_id=e.id
+      order by x.decided_at desc,x.id desc
+      limit 1
+    ) d on true
+  ), bonus_ledger as materialized (
+    select b.*,
+      case when b.manual_decision='approved' then coalesce(nullif(b.manual_agent_id,''),nullif(b.note_owner_id,''),'')
+        else coalesce(nullif(b.note_owner_id,''),'') end credited_agent_id,
+      case when b.manual_decision='approved' then coalesce(nullif(b.manual_agent_name,''),nullif(b.form_isa,''),nullif(b.note_owner,''),'Unknown')
+        else coalesce(nullif(b.note_owner,''),nullif(b.form_isa,''),'Unknown') end credited_agent_name,
+      case when b.manual_decision='approved' then coalesce(nullif(b.manual_agent_email,''),nullif(b.note_owner_email,''),'')
+        else coalesce(nullif(b.note_owner_email,''),'') end credited_agent_email,
+      case
+        when b.manual_decision='retracted' then 'retracted'
+        when b.original_live_status is null
+          and b.first_live_date_eastern >= ((now() at time zone 'America/New_York')::date - 1) then 'waiting_for_note'
+        when b.original_live_status is null then 'missing_formal_note'
+        when b.manual_decision='approved' then 'payable'
+        when coalesce(b.isa_owner_match,false) then 'payable'
+        else 'needs_review'
+      end bonus_state,
+      case
+        when b.manual_decision='approved' then 'manager_approved'
+        when b.manual_decision='retracted' then 'manager_retracted'
+        when b.original_live_status is not null and coalesce(b.isa_owner_match,false) then 'automatic'
+        else 'not_approved'
+      end approval_source
+    from bonus_evidence b
+  ), bonus_selected as materialized (
+    select b.* from bonus_ledger b
+    where (nullif(trim(coalesce(p_filters->>'status','')),'') is null
+        or b.original_live_status=p_filters->>'status')
+      and (nullif(trim(coalesce(p_filters->>'agent','')),'') is null
+        or lower(trim(coalesce(b.credited_agent_id,'')))=lower(trim(p_filters->>'agent'))
+        or report_api.normalize_agent(b.credited_agent_name)=report_api.normalize_agent(p_filters->>'agent')
+        or report_api.normalize_agent(split_part(b.credited_agent_email,'@',1))=report_api.normalize_agent(p_filters->>'agent'))
+  ), bonus_agent_stats as (
+    select coalesce(nullif(credited_agent_id,''),'email:'||lower(nullif(credited_agent_email,'')),
+        'name:'||report_api.normalize_agent(credited_agent_name),'unknown') owner_key,
+      max(credited_agent_name) agent,max(credited_agent_id) agent_id,max(credited_agent_email) agent_email,
+      count(*)::bigint payable_live_leads,
+      count(*) filter (where original_live_status='2.3 Live Transfer')::bigint live_transfers,
+      count(*) filter (where original_live_status='2.4 Live Call Back')::bigint live_call_backs,
+      count(*) filter (where original_live_status='2.5 Live Group Text')::bigint live_texts,
+      count(*) filter (where approval_source='automatic')::bigint auto_approved,
+      count(*) filter (where approval_source='manager_approved')::bigint manager_approved
+    from bonus_selected where bonus_state='payable' group by 1
   )
   select jsonb_build_object(
+    'can_manage_bonus', exists (select 1 from public.report_users u where u.user_id=(select auth.uid()) and u.active is true and u.role in ('manager','admin')),
     'totals', jsonb_build_object(
       'calls', coalesce((select count(*) from base),0),
       'agents', coalesce((select count(*) from agent_stats),0),
@@ -591,6 +776,20 @@ begin
     'agents', coalesce((select jsonb_agg(to_jsonb(s) order by s.score desc, s.calls desc, s.user_name) from scored s), '[]'::jsonb),
     'note_authors', coalesce((select jsonb_agg(to_jsonb(n) order by n.notes desc, n.author) from note_authors n), '[]'::jsonb),
     'live_ownership', coalesce((select jsonb_agg(to_jsonb(l) order by l.live_leads desc,l.agent) from live_agent_stats l), '[]'::jsonb),
+    'live_bonus_agents', coalesce((select jsonb_agg(to_jsonb(a) order by a.payable_live_leads desc,a.agent) from bonus_agent_stats a), '[]'::jsonb),
+    'live_bonus_ledger', coalesce((select jsonb_agg(to_jsonb(b) order by b.first_live_date_eastern desc,b.lead_name,b.id) from bonus_selected b), '[]'::jsonb),
+    'live_bonus_totals', jsonb_build_object(
+      'sent_live_leads',coalesce((select count(*) from bonus_selected),0),
+      'formal_note_gate_passed',coalesce((select count(*) from bonus_selected where original_live_status is not null),0),
+      'payable',coalesce((select count(*) from bonus_selected where bonus_state='payable'),0),
+      'needs_review',coalesce((select count(*) from bonus_selected where bonus_state='needs_review'),0),
+      'waiting_for_note',coalesce((select count(*) from bonus_selected where bonus_state='waiting_for_note'),0),
+      'missing_formal_note',coalesce((select count(*) from bonus_selected where bonus_state='missing_formal_note'),0),
+      'retracted',coalesce((select count(*) from bonus_selected where bonus_state='retracted'),0),
+      'live_transfers_payable',coalesce((select count(*) from bonus_selected where bonus_state='payable' and original_live_status='2.3 Live Transfer'),0),
+      'live_call_backs_payable',coalesce((select count(*) from bonus_selected where bonus_state='payable' and original_live_status='2.4 Live Call Back'),0),
+      'live_texts_payable',coalesce((select count(*) from bonus_selected where bonus_state='payable' and original_live_status='2.5 Live Group Text'),0)
+    ),
     'live_ownership_totals', jsonb_build_object(
       'live_leads',coalesce((select count(*) from live_checked),0),
       'live_transfers',coalesce((select count(*) from live_checked where original_live_status='2.3 Live Transfer'),0),
@@ -606,11 +805,90 @@ begin
       'missing_live_email',coalesce((select count(*) from first_live_candidates where coalesce(live_email_sent,false) is false),0),
       'email_gate_passed',coalesce((select count(*) from live_candidates),0),
       'missing_formal_note',greatest(coalesce((select count(*) from live_candidates),0)-coalesce((select count(*) from live_gated_all),0),0),
+      'historical_form_dates_recovered',coalesce((select count(*) from live_gated_all
+        where form_note_date is not null and form_note_date is distinct from gate_note_date),0),
       'qualified_before_owner_filter',coalesce((select count(*) from live_gated_all),0),
       'selected_qualified',coalesce((select count(*) from live_checked),0)
     ),
     'generated_at', now()
   ) into v_result;
+  return v_result;
+end;
+$$;
+
+create or replace function public.dashboard_live_bonus_review(p_lead_id bigint)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare v_result jsonb;
+begin
+  perform report_api.assert_access();
+  if p_lead_id is null then
+    raise exception 'A valid lead ID is required.' using errcode='22023';
+  end if;
+
+  with selected_lead as materialized (
+    select l.id,l.phone_key,l.first_name,l.last_name,l.phone,l.email,l.lead_status,
+      report_api.classified_lead_type(l) lead_type,l.vendor,l.source_lead_description,
+      l.address,l.address_2,l.city,l.property_state,l.property_zip,
+      l.created_date_eastern,l.lead_date_eastern,l.first_live_date_eastern,
+      l.live_email_sent,l.note latest_saved_note
+    from reporting.leads l where l.id=p_lead_id
+  ), notes as (
+    select coalesce(jsonb_agg(to_jsonb(n) order by n.note_sequence desc nulls last,n.note_time desc nulls last,n.id desc),'[]'::jsonb) items
+    from (
+      select ne.id,ne.ricochet_note_id,ne.note_sequence,ne.note_text,
+        ne.note_user_name,ne.note_user_id,ne.note_user_email,
+        coalesce(ne.note_created_at_utc,ne.detected_at_utc) note_time,
+        ne.is_new_append,ne.match_method,ne.match_confidence,
+        c.id call_id,c.call_uuid,c.call_datetime_text call_date_time,
+        c.duration_seconds,c.user_name call_user_name,c.user_id call_user_id,
+        case when trim(coalesce(c.call_type_id,'')) in ('7','10') then 'Inbound'
+          else coalesce(nullif(c.call_direction,''),'Outbound') end direction,
+        c.call_status,c.recording_status
+      from selected_lead l
+      join reporting.note_events ne on ne.lead_row_id=l.id or (ne.lead_row_id is null and ne.phone_key=l.phone_key)
+      left join reporting.call_events c on c.id=ne.matched_call_event_id
+      order by ne.note_sequence desc nulls last,coalesce(ne.note_created_at_utc,ne.detected_at_utc) desc nulls last,ne.id desc
+      limit 100
+    ) n
+  ), calls as (
+    select coalesce(jsonb_agg(to_jsonb(c) order by c.sort_at desc nulls last,c.id desc),'[]'::jsonb) items
+    from (
+      select ce.id,ce.call_uuid,ce.call_datetime_text call_date_time,ce.call_timestamp sort_at,
+        ce.call_date_eastern call_date,ce.duration_seconds,ce.user_name call_user_name,
+        ce.user_id call_user_id,ce.call_status,ce.recording_status,
+        case when trim(coalesce(ce.call_type_id,'')) in ('7','10') then 'Inbound'
+          else coalesce(nullif(ce.call_direction,''),'Outbound') end direction,
+        ce.ai_analysis_status,ce.ai_agent_score,ce.ai_summary
+      from selected_lead l
+      join reporting.call_events ce on ce.lead_id=l.id or (ce.lead_id is null and ce.phone_key=l.phone_key)
+      order by ce.call_timestamp desc nulls last,ce.id desc
+      limit 50
+    ) c
+  ), decisions as (
+    select coalesce(jsonb_agg(to_jsonb(d) order by d.decided_at desc,d.id desc),'[]'::jsonb) items
+    from (
+      select x.id,x.decision,x.credited_agent_id,x.credited_agent_name,x.credited_agent_email,
+        x.reason,x.decided_by,x.decided_at
+      from public.live_bonus_decisions x where x.lead_id=p_lead_id
+      order by x.decided_at desc,x.id desc limit 50
+    ) d
+  )
+  select jsonb_build_object(
+    'lead',to_jsonb(l),
+    'notes',(select items from notes),
+    'calls',(select items from calls),
+    'decisions',(select items from decisions),
+    'generated_at',now()
+  ) into v_result from selected_lead l;
+
+  if v_result is null then
+    raise exception 'Lead was not found.' using errcode='P0002';
+  end if;
   return v_result;
 end;
 $$;
@@ -978,6 +1256,8 @@ revoke execute on function public.dashboard_notes(date,date,jsonb,integer,intege
 revoke execute on function public.dashboard_ai_review(date,date,jsonb,integer,integer) from public, anon;
 revoke execute on function public.dashboard_csv_match(jsonb) from public, anon;
 revoke execute on function public.dashboard_csv_call_details(bigint[]) from public, anon;
+revoke execute on function public.dashboard_set_live_bonus_decision(bigint,text,text,text,text,text) from public, anon;
+revoke execute on function public.dashboard_live_bonus_review(bigint) from public, anon;
 
 grant execute on function public.dashboard_authorized() to authenticated;
 grant execute on function public.dashboard_filter_options(date,date) to authenticated;
@@ -989,6 +1269,8 @@ grant execute on function public.dashboard_notes(date,date,jsonb,integer,integer
 grant execute on function public.dashboard_ai_review(date,date,jsonb,integer,integer) to authenticated;
 grant execute on function public.dashboard_csv_match(jsonb) to authenticated;
 grant execute on function public.dashboard_csv_call_details(bigint[]) to authenticated;
+grant execute on function public.dashboard_set_live_bonus_decision(bigint,text,text,text,text,text) to authenticated;
+grant execute on function public.dashboard_live_bonus_review(bigint) to authenticated;
 
 commit;
 
