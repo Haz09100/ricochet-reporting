@@ -1,7 +1,7 @@
-import { Bot, CheckCircle2, Download, FileUp, Headphones, Search, Sparkles, TriangleAlert, Users } from "lucide-react";
-import { useMemo, useState } from "react";
+import { Bot, CheckCircle2, ChevronLeft, ChevronRight, Download, FileUp, Headphones, RefreshCw, Search, Sparkles, TriangleAlert, Users, X } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
 import { parseLeadCsv, downloadCsv } from "../lib/csv.js";
-import { loadCsvCallDetails, matchCsvRows, runAiAction, setLiveBonusDecision } from "../lib/reportApi.js";
+import { loadCsvCallDetails, loadLiveBonusReview, matchCsvRows, runAiAction, setLiveBonusDecision } from "../lib/reportApi.js";
 import AudioPlayer from "./AudioPlayer.jsx";
 
 const number = (value, digits = 0) => Number(value || 0).toLocaleString(undefined, { maximumFractionDigits: digits });
@@ -116,11 +116,17 @@ export function TeamView({ data, setToast, onDataChanged }) {
 function LiveBonusReport({ data, setToast, onDataChanged }) {
   const [stateFilter, setStateFilter] = useState("all");
   const [busyLead, setBusyLead] = useState(null);
+  const [selectedLeadId, setSelectedLeadId] = useState(null);
+  const [reviewDetail, setReviewDetail] = useState(null);
+  const [reviewLoading, setReviewLoading] = useState(false);
+  const [reviewError, setReviewError] = useState("");
   const totals = data?.live_bonus_totals || {};
   const canManage = data?.can_manage_bonus === true;
   const agents = data?.live_bonus_agents || [];
   const ledger = data?.live_bonus_ledger || [];
   const visible = stateFilter === "all" ? ledger : ledger.filter((row) => row.bonus_state === stateFilter);
+  const selectedRow = ledger.find((row) => Number(row.id) === Number(selectedLeadId));
+  const selectedVisibleIndex = visible.findIndex((row) => Number(row.id) === Number(selectedLeadId));
   const evidenceMissing = Number(totals.waiting_for_note || 0) + Number(totals.missing_formal_note || 0);
   const cards = [
     ["Live leads sent", totals.sent_live_leads, "Matches Overview"],
@@ -130,29 +136,70 @@ function LiveBonusReport({ data, setToast, onDataChanged }) {
     ["Waiting or missing note", evidenceMissing, "Not payable yet"],
     ["Retracted", totals.retracted, "Removed by manager"],
   ];
+  useEffect(() => {
+    if (!selectedLeadId) { setReviewDetail(null); setReviewError(""); return; }
+    let active = true;
+    setReviewLoading(true); setReviewError("");
+    loadLiveBonusReview(selectedLeadId).then((detail) => { if (active) setReviewDetail(detail); }).catch((error) => { if (active) setReviewError(error.message); }).finally(() => { if (active) setReviewLoading(false); });
+    return () => { active = false; };
+  }, [selectedLeadId]);
+  useEffect(() => {
+    if (!selectedLeadId) return undefined;
+    const closeOnEscape = (event) => { if (event.key === "Escape") setSelectedLeadId(null); };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [selectedLeadId]);
+  const moveReview = (offset) => {
+    if (!visible.length) return;
+    const next = selectedVisibleIndex >= 0
+      ? (selectedVisibleIndex + offset + visible.length) % visible.length
+      : (offset > 0 ? 0 : visible.length - 1);
+    setSelectedLeadId(visible[next].id);
+  };
   const decide = async (row, decision) => {
     const suggestedAgent = row.form_isa || row.note_owner || "";
     let agentName = row.credited_agent_name || suggestedAgent;
     if (decision === "approved") {
       agentName = window.prompt("Agent receiving this bonus", suggestedAgent);
-      if (!agentName) return;
+      if (!agentName) return false;
     }
     const reason = window.prompt(decision === "retracted" ? "Why is this live status being retracted?" : decision === "reset" ? "Why are you restoring automatic review?" : "Why are you approving this agent?");
-    if (!reason) return;
+    if (!reason) return false;
     setBusyLead(row.id);
     try {
       await setLiveBonusDecision({ leadId: row.id, decision, agentName: decision === "approved" ? agentName : "", reason });
       setToast(decision === "retracted" ? "Bonus retracted and saved to the audit history." : decision === "reset" ? "Lead returned to automatic review." : `Bonus approved for ${agentName}.`);
       await onDataChanged?.();
-    } catch (error) { setToast(error.message, true); }
+      return true;
+    } catch (error) { setToast(error.message, true); return false; }
     finally { setBusyLead(null); }
   };
   return <section className="live-ownership-section">
     <div className="section-heading"><div><span className="eyebrow">Monthly bonus control</span><h2>Live-lead bonus ledger</h2><p>Every sent live lead remains visible. A lead becomes payable only after the formal-note gate identifies an agent and ownership is confirmed or approved. Retractions are permanent audit entries and immediately leave the payable total; they do not rewrite the source lead status in Ricochet.</p></div></div>
     <div className="metric-grid ownership-metrics">{cards.map(([label,amount,note],index) => <article className={`metric-card ${index >= 3 ? "gold" : "green"}`} key={label}><span>{label}</span><strong>{number(amount)}</strong><small>{note}</small></article>)}</div>
     <article className="panel report-panel"><div className="panel-heading"><div><span className="eyebrow">Payable by agent</span><h3>Monthly bonus count</h3><p>This is the number to use for payroll. Pending, disputed, missing-note, and retracted leads are excluded.</p></div><button className="button secondary" disabled={!agents.length} onClick={() => downloadCsv("ricochet-payable-live-bonuses.csv", agents)}><Download size={15} />Export bonus CSV</button></div>{!agents.length ? <Empty message="No payable bonuses matched this range." /> : <div className="table-wrap"><table><thead><tr><th>Agent</th><th>Payable bonuses</th><th>2.3 transfer</th><th>2.4 call back</th><th>2.5 group text</th><th>Automatic</th><th>Manager approved</th></tr></thead><tbody>{agents.map((row,index) => <tr key={row.owner_key || index}><td><strong>{value(row,"agent")}</strong><small>{row.agent_id ? `ID ${row.agent_id}` : value(row,"agent_email")}</small></td><td><span className="ownership-confirmed">{number(row.payable_live_leads)}</span></td><td>{number(row.live_transfers)}</td><td>{number(row.live_call_backs)}</td><td>{number(row.live_texts)}</td><td>{number(row.auto_approved)}</td><td>{number(row.manager_approved)}</td></tr>)}</tbody></table></div>}</article>
-    <article className="panel report-panel bonus-review-panel"><div className="panel-heading"><div><span className="eyebrow">Audit and corrections</span><h3>Review every live lead</h3><p>Approve an ownership conflict, retract an incorrect status, or restore a retracted lead to the automatic rules. Changes require manager or admin access.</p></div><div className="segmented"><button className={stateFilter === "all" ? "active" : ""} onClick={() => setStateFilter("all")}>All</button><button className={stateFilter === "needs_review" ? "active" : ""} onClick={() => setStateFilter("needs_review")}>Review</button><button className={stateFilter === "payable" ? "active" : ""} onClick={() => setStateFilter("payable")}>Payable</button><button className={stateFilter === "retracted" ? "active" : ""} onClick={() => setStateFilter("retracted")}>Retracted</button></div></div>{!visible.length ? <Empty message="No live leads matched this review state." /> : <div className="table-wrap"><table><thead><tr><th>Lead</th><th>First live date</th><th>Disposition</th><th>Formal-note owner</th><th>Form ISA</th><th>Bonus state</th><th>Last decision</th><th>Actions</th></tr></thead><tbody>{visible.map((row) => <tr key={row.id}><td><strong>{row.lead_name || `Lead ${row.id}`}</strong><small>ID {row.id}</small></td><td>{value(row,"first_live_date_eastern")}</td><td>{value(row,"original_live_status")}</td><td>{value(row,"note_owner")}</td><td>{value(row,"form_isa")}</td><td><span className={`bonus-state ${row.bonus_state}`}>{String(row.bonus_state || "unknown").replaceAll("_"," ")}</span></td><td>{row.manual_decision ? <><strong>{row.manual_decision}</strong><small>{row.decision_reason || ""}</small></> : "Automatic"}</td><td>{canManage ? <div className="bonus-actions">{row.bonus_state === "needs_review" && <button className="text-action" disabled={busyLead === row.id} onClick={() => decide(row,"approved")}>Approve agent</button>}{row.bonus_state !== "retracted" && <button className="text-action danger" disabled={busyLead === row.id} onClick={() => decide(row,"retracted")}>Retract</button>}{row.bonus_state === "retracted" && <button className="text-action" disabled={busyLead === row.id} onClick={() => decide(row,"reset")}>Restore review</button>}</div> : <span className="muted">Manager only</span>}</td></tr>)}</tbody></table></div>}</article>
+    <article className="panel report-panel bonus-review-panel"><div className="panel-heading"><div><span className="eyebrow">Audit and corrections</span><h3>Review every live lead</h3><p>Click a lead to open the complete notes, calls, recordings, ownership evidence, and decision history. Changes require manager or admin access.</p></div><div className="segmented"><button className={stateFilter === "all" ? "active" : ""} onClick={() => setStateFilter("all")}>All</button><button className={stateFilter === "needs_review" ? "active" : ""} onClick={() => setStateFilter("needs_review")}>Review</button><button className={stateFilter === "payable" ? "active" : ""} onClick={() => setStateFilter("payable")}>Payable</button><button className={stateFilter === "retracted" ? "active" : ""} onClick={() => setStateFilter("retracted")}>Retracted</button></div></div>{!visible.length ? <Empty message="No live leads matched this review state." /> : <div className="table-wrap"><table><thead><tr><th>Lead</th><th>First live date</th><th>Disposition</th><th>Formal-note owner</th><th>Form ISA</th><th>Bonus state</th><th>Last decision</th><th>Actions</th></tr></thead><tbody>{visible.map((row) => <tr key={row.id}><td><button className="lead-review-link" onClick={() => setSelectedLeadId(row.id)}><strong>{row.lead_name || `Lead ${row.id}`}</strong><small>ID {row.id} · Open full review</small></button></td><td>{value(row,"first_live_date_eastern")}</td><td>{value(row,"original_live_status")}</td><td>{value(row,"note_owner")}</td><td>{value(row,"form_isa")}</td><td><span className={`bonus-state ${row.bonus_state}`}>{String(row.bonus_state || "unknown").replaceAll("_"," ")}</span></td><td>{row.manual_decision ? <><strong>{row.manual_decision}</strong><small>{row.decision_reason || ""}</small></> : "Automatic"}</td><td>{canManage ? <div className="bonus-actions">{row.bonus_state === "needs_review" && <button className="text-action" disabled={busyLead === row.id} onClick={() => decide(row,"approved")}>Approve agent</button>}{row.bonus_state !== "retracted" && <button className="text-action danger" disabled={busyLead === row.id} onClick={() => decide(row,"retracted")}>Retract</button>}{row.bonus_state === "retracted" && <button className="text-action" disabled={busyLead === row.id} onClick={() => decide(row,"reset")}>Restore review</button>}</div> : <span className="muted">Manager only</span>}</td></tr>)}</tbody></table></div>}</article>
+    {selectedLeadId && <LiveBonusReviewModal row={selectedRow} detail={reviewDetail} loading={reviewLoading} error={reviewError} canManage={canManage} busy={busyLead === selectedLeadId} onClose={() => setSelectedLeadId(null)} onPrevious={() => moveReview(-1)} onNext={() => moveReview(1)} onApprove={async () => { if (selectedRow && await decide(selectedRow,"approved")) moveReview(1); }} onReject={async () => { if (selectedRow && await decide(selectedRow,"retracted")) moveReview(1); }} />}
   </section>;
+}
+
+function LiveBonusReviewModal({ row, detail, loading, error, canManage, busy, onClose, onPrevious, onNext, onApprove, onReject }) {
+  const lead = detail?.lead || {};
+  const notes = detail?.notes || [];
+  const calls = detail?.calls || [];
+  const decisions = detail?.decisions || [];
+  const latestCall = calls[0];
+  return <div className="review-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section className="review-modal" role="dialog" aria-modal="true" aria-label={`Review ${row?.lead_name || lead.first_name || "live lead"}`}>
+    <header className="review-modal-header"><div><span className="eyebrow">Complete live-lead review</span><h2>{row?.lead_name || [lead.first_name,lead.last_name].filter(Boolean).join(" ") || `Lead ${row?.id || ""}`}</h2><div className="tag-row"><span className={`bonus-state ${row?.bonus_state}`}>{String(row?.bonus_state || "unknown").replaceAll("_"," ")}</span><span className="tag">{row?.original_live_status || lead.lead_status || "No disposition"}</span></div></div><button className="review-close" onClick={onClose} aria-label="Close review"><X size={22} /></button></header>
+    {loading ? <div className="review-modal-loading"><RefreshCw className="spin" /><span>Loading notes, calls, and recordings…</span></div> : error ? <div className="error-box"><TriangleAlert size={16} /><span>{error}</span></div> : <div className="review-modal-body">
+      <section className="review-summary-grid">{[["Lead ID",lead.id || row?.id],["First live date",row?.first_live_date_eastern || lead.first_live_date_eastern],["Current status",lead.lead_status],["Lead type",lead.lead_type],["Formal-note owner",row?.note_owner],["Form ISA",row?.form_isa],["Live email",lead.live_email_sent ? "Sent" : "Not sent"],["Vendor",lead.vendor],["Phone",lead.phone],["Email",lead.email],["Location",[lead.address,lead.city,lead.property_state,lead.property_zip].filter(Boolean).join(", ")]].map(([label,item]) => <div className="review-fact" key={label}><span>{label}</span><strong>{item || "—"}</strong></div>)}</section>
+      <section className="review-section"><div className="review-section-heading"><div><span className="eyebrow">Last call</span><h3>Most recent call and owner</h3></div></div>{latestCall ? <div className="review-call featured"><div><strong>{latestCall.call_date_time || latestCall.call_date}</strong><span>{latestCall.call_user_name || "Unknown caller"} {latestCall.call_user_id ? `· ID ${latestCall.call_user_id}` : ""}</span><small>{latestCall.direction || "Unknown direction"} · {duration(latestCall.duration_seconds)} · {latestCall.call_status || "Unknown status"}</small></div>{latestCall.call_uuid ? <AudioPlayer compact callUuid={latestCall.call_uuid} /> : <span className="unmatched-recording">No playable recording</span>}</div> : <Empty message="No calls were found for this lead." />}</section>
+      <section className="review-section"><div className="review-section-heading"><div><span className="eyebrow">Notes</span><h3>Complete note history · {number(notes.length)}</h3></div></div>{notes.length ? <div className="review-notes">{notes.map((note,index) => <NoteEntry note={note} latest={index === 0} live={/DISPOSITION[\s\S]*(LIVE|2\.3|2\.4|2\.5)/i.test(String(note.note_text || ""))} key={note.id || index} />)}</div> : <Empty message="No synchronized notes were found." />}</section>
+      <section className="review-section"><div className="review-section-heading"><div><span className="eyebrow">Call timeline</span><h3>Calls and recordings · {number(calls.length)}</h3></div></div>{calls.length ? <div className="review-calls">{calls.map((call) => <div className="review-call" key={call.id}><div><strong>{call.call_date_time || call.call_date}</strong><span>{call.call_user_name || "Unknown caller"} {call.call_user_id ? `· ID ${call.call_user_id}` : ""}</span><small>{call.direction || "Unknown direction"} · {duration(call.duration_seconds)} · {call.call_status || "Unknown status"}</small></div>{call.call_uuid ? <AudioPlayer compact callUuid={call.call_uuid} /> : <span className="unmatched-recording">No recording</span>}</div>)}</div> : <Empty message="No calls were found." />}</section>
+      <section className="review-section"><div className="review-section-heading"><div><span className="eyebrow">Decision history</span><h3>Bonus audit trail</h3></div></div>{decisions.length ? <div className="decision-history">{decisions.map((decision) => <div key={decision.id}><strong>{decision.decision}</strong><span>{decision.credited_agent_name || "No credited agent"}</span><small>{decision.reason} · {formatNoteTime(decision.decided_at)}</small></div>)}</div> : <span className="muted">No manual decisions. Automatic rules currently control this lead.</span>}</section>
+    </div>}
+    <footer className="review-modal-footer"><div className="review-navigation"><button className="button secondary" onClick={onPrevious}><ChevronLeft size={16} />Previous</button><button className="button secondary" onClick={onNext}>Next lead<ChevronRight size={16} /></button></div><div className="review-decisions">{canManage && row?.bonus_state !== "retracted" && <button className="button reject-button" disabled={busy} onClick={onReject}>Reject / retract</button>}{canManage && row?.original_live_status && row?.bonus_state !== "payable" && row?.bonus_state !== "retracted" && <button className="button primary" disabled={busy} onClick={onApprove}>Approve bonus</button>}{!canManage && <span className="muted">Manager or admin access is required to decide.</span>}</div></footer>
+  </section></div>;
 }
 
 function LiveOwnershipReport({ data }) {
