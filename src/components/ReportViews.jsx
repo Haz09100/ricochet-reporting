@@ -1,7 +1,7 @@
 import { Bot, CheckCircle2, Download, FileUp, Headphones, Search, Sparkles, TriangleAlert, Users } from "lucide-react";
 import { useMemo, useState } from "react";
 import { parseLeadCsv, downloadCsv } from "../lib/csv.js";
-import { loadCsvCallDetails, matchCsvRows, runAiAction } from "../lib/reportApi.js";
+import { loadCsvCallDetails, matchCsvRows, runAiAction, setLiveBonusDecision } from "../lib/reportApi.js";
 import AudioPlayer from "./AudioPlayer.jsx";
 
 const number = (value, digits = 0) => Number(value || 0).toLocaleString(undefined, { maximumFractionDigits: digits });
@@ -102,15 +102,57 @@ export function OverviewView({ data }) {
   </>;
 }
 
-export function TeamView({ data }) {
+export function TeamView({ data, setToast, onDataChanged }) {
   const [mode, setMode] = useState("calls");
   const rows = mode === "calls" ? data?.agents || [] : data?.note_authors || [];
   const totals = data?.totals || {};
-  const qualifiedLiveLeads = data?.live_ownership_totals?.live_leads || 0;
+  const qualifiedLiveLeads = data?.live_bonus_totals?.sent_live_leads || 0;
   const exportRows = () => downloadCsv(mode === "calls" ? "ricochet-agent-calls.csv" : "ricochet-note-authors.csv", rows);
-  return <><div className="metric-grid teacher-metrics team-summary">{[["Calls made",totals.calls,"All matching calls"],["Unique leads",totals.unique_leads,"Called in range"],["Total talk time",longDuration(totals.duration_seconds),"All agents"],["Qualified live leads",qualifiedLiveLeads,"First event passed all gates"]].map(([label, amount, note]) => <article className="metric-card green" key={label}><span>{label}</span><strong>{typeof amount === "number" ? number(amount) : amount}</strong><small>{note}</small></article>)}</div><article className="panel report-panel"><div className="panel-heading"><div><span className="eyebrow">Agent performance</span><h3>Calls and talk time in the selected range</h3><p>Live ownership is reported separately below using the original gated live event.</p></div><div className="panel-actions"><div className="segmented"><button className={mode === "calls" ? "active" : ""} onClick={() => setMode("calls")}>By calls</button><button className={mode === "notes" ? "active" : ""} onClick={() => setMode("notes")}>By notes</button></div><button className="button secondary" disabled={!rows.length} onClick={exportRows}><Download size={15} />Export CSV</button></div></div>
+  return <><div className="metric-grid teacher-metrics team-summary">{[["Calls made",totals.calls,"All matching calls"],["Unique leads",totals.unique_leads,"Called in range"],["Total talk time",longDuration(totals.duration_seconds),"All agents"],["Live leads sent",qualifiedLiveLeads,"Complete bonus population"]].map(([label, amount, note]) => <article className="metric-card green" key={label}><span>{label}</span><strong>{typeof amount === "number" ? number(amount) : amount}</strong><small>{note}</small></article>)}</div><article className="panel report-panel"><div className="panel-heading"><div><span className="eyebrow">Agent performance</span><h3>Calls and talk time in the selected range</h3><p>Live ownership is reported separately below using the original gated live event.</p></div><div className="panel-actions"><div className="segmented"><button className={mode === "calls" ? "active" : ""} onClick={() => setMode("calls")}>By calls</button><button className={mode === "notes" ? "active" : ""} onClick={() => setMode("notes")}>By notes</button></div><button className="button secondary" disabled={!rows.length} onClick={exportRows}><Download size={15} />Export CSV</button></div></div>
     {!rows.length ? <Empty message="No agent activity matched these filters." /> : <div className="table-wrap"><table><thead><tr>{mode === "calls" ? <><th>Caller</th><th>Score</th><th>Calls made</th><th>Unique leads</th><th>Handled</th><th>Total talk time</th><th>Avg duration</th><th>First call</th><th>Last call</th></> : <><th>Note author</th><th>Notes</th><th>Unique leads</th><th>First note</th><th>Last note</th></>}</tr></thead><tbody>{rows.map((row, index) => mode === "calls" ? <tr key={row.user_id || row.user_name || index}><td><strong>{value(row, "user_name")}</strong><small>{value(row, "user_id")}</small></td><td><span className="score">{number(row.score)}</span></td><td>{number(row.calls)}</td><td>{number(row.unique_leads)}</td><td>{number(row.handled_calls)}</td><td>{longDuration(row.duration_seconds)}</td><td>{duration(row.average_duration_seconds)}</td><td>{value(row, "first_call")}</td><td>{value(row, "last_call")}</td></tr> : <tr key={row.author || index}><td><strong>{value(row, "author")}</strong></td><td>{number(row.notes)}</td><td>{number(row.unique_leads)}</td><td>{value(row, "first_note")}</td><td>{value(row, "last_note")}</td></tr>)}</tbody></table></div>}
-  </article><LiveOwnershipReport data={data} /></>;
+  </article><LiveBonusReport data={data} setToast={setToast} onDataChanged={onDataChanged} /></>;
+}
+
+function LiveBonusReport({ data, setToast, onDataChanged }) {
+  const [stateFilter, setStateFilter] = useState("all");
+  const [busyLead, setBusyLead] = useState(null);
+  const totals = data?.live_bonus_totals || {};
+  const canManage = data?.can_manage_bonus === true;
+  const agents = data?.live_bonus_agents || [];
+  const ledger = data?.live_bonus_ledger || [];
+  const visible = stateFilter === "all" ? ledger : ledger.filter((row) => row.bonus_state === stateFilter);
+  const evidenceMissing = Number(totals.waiting_for_note || 0) + Number(totals.missing_formal_note || 0);
+  const cards = [
+    ["Live leads sent", totals.sent_live_leads, "Matches Overview"],
+    ["Formal-note gate passed", totals.formal_note_gate_passed, "Evidence found"],
+    ["Payable bonuses", totals.payable, "Approved agent credit"],
+    ["Needs review", totals.needs_review, "Owner / ISA conflict"],
+    ["Waiting or missing note", evidenceMissing, "Not payable yet"],
+    ["Retracted", totals.retracted, "Removed by manager"],
+  ];
+  const decide = async (row, decision) => {
+    const suggestedAgent = row.form_isa || row.note_owner || "";
+    let agentName = row.credited_agent_name || suggestedAgent;
+    if (decision === "approved") {
+      agentName = window.prompt("Agent receiving this bonus", suggestedAgent);
+      if (!agentName) return;
+    }
+    const reason = window.prompt(decision === "retracted" ? "Why is this live status being retracted?" : decision === "reset" ? "Why are you restoring automatic review?" : "Why are you approving this agent?");
+    if (!reason) return;
+    setBusyLead(row.id);
+    try {
+      await setLiveBonusDecision({ leadId: row.id, decision, agentName: decision === "approved" ? agentName : "", reason });
+      setToast(decision === "retracted" ? "Bonus retracted and saved to the audit history." : decision === "reset" ? "Lead returned to automatic review." : `Bonus approved for ${agentName}.`);
+      await onDataChanged?.();
+    } catch (error) { setToast(error.message, true); }
+    finally { setBusyLead(null); }
+  };
+  return <section className="live-ownership-section">
+    <div className="section-heading"><div><span className="eyebrow">Monthly bonus control</span><h2>Live-lead bonus ledger</h2><p>Every sent live lead remains visible. A lead becomes payable only after the formal-note gate identifies an agent and ownership is confirmed or approved. Retractions are permanent audit entries and immediately leave the payable total; they do not rewrite the source lead status in Ricochet.</p></div></div>
+    <div className="metric-grid ownership-metrics">{cards.map(([label,amount,note],index) => <article className={`metric-card ${index >= 3 ? "gold" : "green"}`} key={label}><span>{label}</span><strong>{number(amount)}</strong><small>{note}</small></article>)}</div>
+    <article className="panel report-panel"><div className="panel-heading"><div><span className="eyebrow">Payable by agent</span><h3>Monthly bonus count</h3><p>This is the number to use for payroll. Pending, disputed, missing-note, and retracted leads are excluded.</p></div><button className="button secondary" disabled={!agents.length} onClick={() => downloadCsv("ricochet-payable-live-bonuses.csv", agents)}><Download size={15} />Export bonus CSV</button></div>{!agents.length ? <Empty message="No payable bonuses matched this range." /> : <div className="table-wrap"><table><thead><tr><th>Agent</th><th>Payable bonuses</th><th>2.3 transfer</th><th>2.4 call back</th><th>2.5 group text</th><th>Automatic</th><th>Manager approved</th></tr></thead><tbody>{agents.map((row,index) => <tr key={row.owner_key || index}><td><strong>{value(row,"agent")}</strong><small>{row.agent_id ? `ID ${row.agent_id}` : value(row,"agent_email")}</small></td><td><span className="ownership-confirmed">{number(row.payable_live_leads)}</span></td><td>{number(row.live_transfers)}</td><td>{number(row.live_call_backs)}</td><td>{number(row.live_texts)}</td><td>{number(row.auto_approved)}</td><td>{number(row.manager_approved)}</td></tr>)}</tbody></table></div>}</article>
+    <article className="panel report-panel bonus-review-panel"><div className="panel-heading"><div><span className="eyebrow">Audit and corrections</span><h3>Review every live lead</h3><p>Approve an ownership conflict, retract an incorrect status, or restore a retracted lead to the automatic rules. Changes require manager or admin access.</p></div><div className="segmented"><button className={stateFilter === "all" ? "active" : ""} onClick={() => setStateFilter("all")}>All</button><button className={stateFilter === "needs_review" ? "active" : ""} onClick={() => setStateFilter("needs_review")}>Review</button><button className={stateFilter === "payable" ? "active" : ""} onClick={() => setStateFilter("payable")}>Payable</button><button className={stateFilter === "retracted" ? "active" : ""} onClick={() => setStateFilter("retracted")}>Retracted</button></div></div>{!visible.length ? <Empty message="No live leads matched this review state." /> : <div className="table-wrap"><table><thead><tr><th>Lead</th><th>First live date</th><th>Disposition</th><th>Formal-note owner</th><th>Form ISA</th><th>Bonus state</th><th>Last decision</th><th>Actions</th></tr></thead><tbody>{visible.map((row) => <tr key={row.id}><td><strong>{row.lead_name || `Lead ${row.id}`}</strong><small>ID {row.id}</small></td><td>{value(row,"first_live_date_eastern")}</td><td>{value(row,"original_live_status")}</td><td>{value(row,"note_owner")}</td><td>{value(row,"form_isa")}</td><td><span className={`bonus-state ${row.bonus_state}`}>{String(row.bonus_state || "unknown").replaceAll("_"," ")}</span></td><td>{row.manual_decision ? <><strong>{row.manual_decision}</strong><small>{row.decision_reason || ""}</small></> : "Automatic"}</td><td>{canManage ? <div className="bonus-actions">{row.bonus_state === "needs_review" && <button className="text-action" disabled={busyLead === row.id} onClick={() => decide(row,"approved")}>Approve agent</button>}{row.bonus_state !== "retracted" && <button className="text-action danger" disabled={busyLead === row.id} onClick={() => decide(row,"retracted")}>Retract</button>}{row.bonus_state === "retracted" && <button className="text-action" disabled={busyLead === row.id} onClick={() => decide(row,"reset")}>Restore review</button>}</div> : <span className="muted">Manager only</span>}</td></tr>)}</tbody></table></div>}</article>
+  </section>;
 }
 
 function LiveOwnershipReport({ data }) {
@@ -182,8 +224,8 @@ export function TeacherView({ data, page, setPage, setToast }) {
   return <><div className="teacher-actions"><div><span className="eyebrow">AI teacher review</span><h2>Manager review queue</h2><p>Read-only review data comes from Supabase. Paid AI, recording, and D1 corrections remain behind the private Worker bridge.</p></div><button className="button primary" onClick={audit}><Sparkles size={16} />Run paid audit</button></div><div className="metric-grid teacher-metrics">{[["Reviewed",totals.reviewed,"green"],["Needs review",totals.needs_review,"gold"],["Queued",totals.queued,"blue"],["Processing",totals.processing,"violet"]].map(([label, amount, tone]) => <article className={`metric-card ${tone}`} key={label}><span>{label}</span><strong>{number(amount)}</strong><small>Selected range</small></article>)}</div><article className="panel report-panel"><div className="panel-heading"><div><span className="eyebrow">Review queue</span><h3>Calls needing manager attention</h3></div></div>{data?.rows?.length ? <div className="table-wrap"><table><thead><tr><th>Lead</th><th>Call</th><th>Agent</th><th>Trigger</th><th>Score</th><th>Recording</th></tr></thead><tbody>{data.rows.map((row) => <tr key={row.call_event_id}><td>{fullName(row)}</td><td>{row.call_date_time}</td><td>{row.user_name}</td><td>{row.trigger_reason}</td><td>{number(row.ai_agent_score)}</td><td><AudioPlayer compact callUuid={row.call_uuid} /></td></tr>)}</tbody></table></div> : <Empty message="No AI reviews match these filters." />}<Pager data={data} page={page} setPage={setPage} /></article></>;
 }
 
-export function ViewRouter({ page, data, pagination, setPagination, setToast }) {
-  if (page === "team") return <TeamView data={data} />;
+export function ViewRouter({ page, data, pagination, setPagination, setToast, onDataChanged }) {
+  if (page === "team") return <TeamView data={data} setToast={setToast} onDataChanged={onDataChanged} />;
   if (page === "calls") return <CallsView data={data} page={pagination.page} setPage={(pageNumber) => setPagination({ ...pagination, page: pageNumber })} setToast={setToast} />;
   if (page === "notes") return <NotesView data={data} page={pagination.page} setPage={(pageNumber) => setPagination({ ...pagination, page: pageNumber })} />;
   if (page === "leads") return <LeadsView data={data} page={pagination.page} setPage={(pageNumber) => setPagination({ ...pagination, page: pageNumber })} />;
