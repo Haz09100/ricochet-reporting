@@ -172,6 +172,13 @@ tbody tr:hover { background: #fafbfd; }
 .ownership-confirmed, .ownership-clear, .ownership-review { display: inline-flex; min-width: 30px; justify-content: center; border-radius: 999px; padding: 4px 8px; font-weight: 800; }
 .ownership-confirmed, .ownership-clear { color: #08705e; background: #e4f7f1; }
 .ownership-review { color: #9a5d00; background: #fff2c8; }
+.bonus-review-panel .table-wrap { max-height: 620px; }
+.bonus-actions { display: flex; gap: 9px; align-items: center; white-space: nowrap; }
+.text-action.danger { color: #b14b42; }
+.bonus-state { display: inline-flex; border-radius: 999px; padding: 4px 8px; font-size: 8px; font-weight: 800; text-transform: capitalize; white-space: nowrap; }
+.bonus-state.payable { color: #08705e; background: #e4f7f1; }
+.bonus-state.needs_review, .bonus-state.waiting_for_note { color: #8a5b00; background: #fff2c8; }
+.bonus-state.missing_formal_note, .bonus-state.retracted { color: #a1463e; background: #fff0ed; }
 .connections-grid { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 12px; margin-top: 18px; }.connection-card h3 { margin: 16px 0 6px; font-size: 14px; }.connection-card p { margin: 0; color: var(--muted); font-size: 10px; line-height: 1.5; }.connection-state { display: inline-flex; border-radius: 20px; padding: 4px 8px; font-size: 8px; font-weight: 800; text-transform: uppercase; letter-spacing: .06em; }.ok-state { color: #087b67; background: #e7f6f1; }.warning-state { color: #a56a00; background: #fff6da; }
 .loading-panel, .app-loading { min-height: 320px; display: grid; place-items: center; align-content: center; gap: 9px; color: var(--muted); }.loading-panel strong { color: #2d415d; }.loading-panel span { font-size: 10px; }
 .error-box { width: 100%; display: flex; gap: 8px; align-items: center; border: 1px solid #efb8ae; border-radius: 8px; background: #fff2ef; color: #a34c3e; padding: 10px; font-size: 10px; }.page-error { margin-top: 12px; }.page-error span { flex: 1; }.page-error button { border: 0; color: inherit; background: transparent; font-weight: 800; }

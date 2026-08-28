@@ -207,7 +207,7 @@ export default function App() {
         {!['csv','settings'].includes(page) && <FilterPanel draft={draftFilters} setDraft={setDraftFilters} apply={applyFilters} options={options} open={filtersOpen} setOpen={setFiltersOpen} />}
         {preview && <div className="preview-banner">Visual preview data is active. Add the GitHub repository variables and run the Supabase SQL before publishing.</div>}
         {error && <div className="error-box page-error"><X size={17} /><span>{error}</span><button onClick={() => load()}>Try again</button></div>}
-        {loading ? <div className="loading-panel"><RefreshCw className="spin" /><strong>Loading {title.toLowerCase()}…</strong><span>Directly from secured Supabase report functions</span></div> : page === "settings" ? <ConnectionsView session={session} preview={preview} /> : <ViewRouter page={page} data={data || {}} pagination={pagination} setPagination={setPagination} setToast={setToast} />}
+        {loading ? <div className="loading-panel"><RefreshCw className="spin" /><strong>Loading {title.toLowerCase()}…</strong><span>Directly from secured Supabase report functions</span></div> : page === "settings" ? <ConnectionsView session={session} preview={preview} /> : <ViewRouter page={page} data={data || {}} pagination={pagination} setPagination={setPagination} setToast={setToast} onDataChanged={() => load({ force: true })} />}
         <footer className="report-footer"><span>Data: Supabase · Sync source: D1</span><span>{lastUpdated ? `Updated ${lastUpdated.toLocaleTimeString()}` : "Waiting for first refresh"}</span></footer>
       </section>
     </main>
