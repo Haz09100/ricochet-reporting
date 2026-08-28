@@ -69,6 +69,34 @@ function Pager({ data, page, setPage }) {
   return <div className="pager"><span>{number(total)} rows · Page {page} of {pages}</span><div><button className="button secondary" disabled={page <= 1} onClick={() => setPage(page - 1)}>Previous</button><button className="button secondary" disabled={page >= pages} onClick={() => setPage(page + 1)}>Next</button></div></div>;
 }
 
+function LeadReviewPopup({ rows, selectedLeadId, setSelectedLeadId }) {
+  const [detail, setDetail] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const reviewRows = rows.filter((row) => Number(row.lead_id || row.id || 0));
+  const selectedIndex = reviewRows.findIndex((row) => Number(row.lead_id || row.id) === Number(selectedLeadId));
+  const sourceRow = selectedIndex >= 0 ? reviewRows[selectedIndex] : reviewRows.find((row) => Number(row.lead_id || row.id) === Number(selectedLeadId));
+  const leadName = [sourceRow?.matched_first_name || sourceRow?.first_name, sourceRow?.matched_last_name || sourceRow?.last_name].filter(Boolean).join(" ") || `Lead ${selectedLeadId}`;
+  const modalRow = { ...sourceRow, id: Number(sourceRow?.lead_id || sourceRow?.id || selectedLeadId), lead_name: leadName, original_live_status: sourceRow?.lead_status };
+  useEffect(() => {
+    let active = true;
+    setLoading(true); setError(""); setDetail(null);
+    loadLiveBonusReview(selectedLeadId).then((output) => { if (active) setDetail(output); }).catch((cause) => { if (active) setError(cause.message); }).finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [selectedLeadId]);
+  useEffect(() => {
+    const closeOnEscape = (event) => { if (event.key === "Escape") setSelectedLeadId(null); };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [setSelectedLeadId]);
+  const move = (offset) => {
+    if (!reviewRows.length) return;
+    const next = selectedIndex >= 0 ? (selectedIndex + offset + reviewRows.length) % reviewRows.length : 0;
+    setSelectedLeadId(Number(reviewRows[next].lead_id || reviewRows[next].id));
+  };
+  return <LiveBonusReviewModal row={modalRow} detail={detail} loading={loading} error={error} bonusMode={false} onClose={() => setSelectedLeadId(null)} onPrevious={() => move(-1)} onNext={() => move(1)} />;
+}
+
 export function OverviewView({ data }) {
   const totals = data?.totals || {};
   const cards = [
@@ -183,22 +211,25 @@ function LiveBonusReport({ data, setToast, onDataChanged }) {
   </section>;
 }
 
-function LiveBonusReviewModal({ row, detail, loading, error, canManage, busy, onClose, onPrevious, onNext, onApprove, onReject }) {
+function LiveBonusReviewModal({ row, detail, loading, error, canManage, busy, onClose, onPrevious, onNext, onApprove, onReject, bonusMode = true }) {
   const lead = detail?.lead || {};
   const notes = detail?.notes || [];
   const calls = detail?.calls || [];
   const decisions = detail?.decisions || [];
   const latestCall = calls[0];
-  return <div className="review-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section className="review-modal" role="dialog" aria-modal="true" aria-label={`Review ${row?.lead_name || lead.first_name || "live lead"}`}>
-    <header className="review-modal-header"><div><span className="eyebrow">Complete live-lead review</span><h2>{row?.lead_name || [lead.first_name,lead.last_name].filter(Boolean).join(" ") || `Lead ${row?.id || ""}`}</h2><div className="tag-row"><span className={`bonus-state ${row?.bonus_state}`}>{String(row?.bonus_state || "unknown").replaceAll("_"," ")}</span><span className="tag">{row?.original_live_status || lead.lead_status || "No disposition"}</span></div></div><button className="review-close" onClick={onClose} aria-label="Close review"><X size={22} /></button></header>
+  const facts = [["Lead ID",lead.id || row?.id],["First live date",row?.first_live_date_eastern || lead.first_live_date_eastern],["Current status",lead.lead_status],["Lead type",lead.lead_type]];
+  if (bonusMode) facts.push(["Formal-note owner",row?.note_owner],["Form ISA",row?.form_isa]);
+  facts.push(["Live email",lead.live_email_sent ? "Sent" : "Not sent"],["Vendor",lead.vendor],["Phone",lead.phone],["Email",lead.email],["Location",[lead.address,lead.city,lead.property_state,lead.property_zip].filter(Boolean).join(", ")]);
+  return <div className="review-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section className="review-modal" role="dialog" aria-modal="true" aria-label={`Review ${row?.lead_name || lead.first_name || "lead"}`}>
+    <header className="review-modal-header"><div><span className="eyebrow">{bonusMode ? "Complete live-lead review" : "Complete lead record"}</span><h2>{row?.lead_name || [lead.first_name,lead.last_name].filter(Boolean).join(" ") || `Lead ${row?.id || ""}`}</h2><div className="tag-row">{bonusMode && row?.bonus_state && <span className={`bonus-state ${row.bonus_state}`}>{String(row.bonus_state).replaceAll("_"," ")}</span>}<span className="tag">{row?.original_live_status || lead.lead_status || "No disposition"}</span></div></div><button className="review-close" onClick={onClose} aria-label="Close review"><X size={22} /></button></header>
     {loading ? <div className="review-modal-loading"><RefreshCw className="spin" /><span>Loading notes, calls, and recordings…</span></div> : error ? <div className="error-box"><TriangleAlert size={16} /><span>{error}</span></div> : <div className="review-modal-body">
-      <section className="review-summary-grid">{[["Lead ID",lead.id || row?.id],["First live date",row?.first_live_date_eastern || lead.first_live_date_eastern],["Current status",lead.lead_status],["Lead type",lead.lead_type],["Formal-note owner",row?.note_owner],["Form ISA",row?.form_isa],["Live email",lead.live_email_sent ? "Sent" : "Not sent"],["Vendor",lead.vendor],["Phone",lead.phone],["Email",lead.email],["Location",[lead.address,lead.city,lead.property_state,lead.property_zip].filter(Boolean).join(", ")]].map(([label,item]) => <div className="review-fact" key={label}><span>{label}</span><strong>{item || "—"}</strong></div>)}</section>
+      <section className="review-summary-grid">{facts.map(([label,item]) => <div className="review-fact" key={label}><span>{label}</span><strong>{item || "—"}</strong></div>)}</section>
       <section className="review-section"><div className="review-section-heading"><div><span className="eyebrow">Last call</span><h3>Most recent call and owner</h3></div></div>{latestCall ? <div className="review-call featured"><div><strong>{latestCall.call_date_time || latestCall.call_date}</strong><span>{latestCall.call_user_name || "Unknown caller"} {latestCall.call_user_id ? `· ID ${latestCall.call_user_id}` : ""}</span><small>{latestCall.direction || "Unknown direction"} · {duration(latestCall.duration_seconds)} · {latestCall.call_status || "Unknown status"}</small></div>{latestCall.call_uuid ? <AudioPlayer compact callUuid={latestCall.call_uuid} /> : <span className="unmatched-recording">No playable recording</span>}</div> : <Empty message="No calls were found for this lead." />}</section>
       <section className="review-section"><div className="review-section-heading"><div><span className="eyebrow">Notes</span><h3>Complete note history · {number(notes.length)}</h3></div></div>{notes.length ? <div className="review-notes">{notes.map((note,index) => <NoteEntry note={note} latest={index === 0} live={/DISPOSITION[\s\S]*(LIVE|2\.3|2\.4|2\.5)/i.test(String(note.note_text || ""))} key={note.id || index} />)}</div> : <Empty message="No synchronized notes were found." />}</section>
       <section className="review-section"><div className="review-section-heading"><div><span className="eyebrow">Call timeline</span><h3>Calls and recordings · {number(calls.length)}</h3></div></div>{calls.length ? <div className="review-calls">{calls.map((call) => <div className="review-call" key={call.id}><div><strong>{call.call_date_time || call.call_date}</strong><span>{call.call_user_name || "Unknown caller"} {call.call_user_id ? `· ID ${call.call_user_id}` : ""}</span><small>{call.direction || "Unknown direction"} · {duration(call.duration_seconds)} · {call.call_status || "Unknown status"}</small></div>{call.call_uuid ? <AudioPlayer compact callUuid={call.call_uuid} /> : <span className="unmatched-recording">No recording</span>}</div>)}</div> : <Empty message="No calls were found." />}</section>
-      <section className="review-section"><div className="review-section-heading"><div><span className="eyebrow">Decision history</span><h3>Bonus audit trail</h3></div></div>{decisions.length ? <div className="decision-history">{decisions.map((decision) => <div key={decision.id}><strong>{decision.decision}</strong><span>{decision.credited_agent_name || "No credited agent"}</span><small>{decision.reason} · {formatNoteTime(decision.decided_at)}</small></div>)}</div> : <span className="muted">No manual decisions. Automatic rules currently control this lead.</span>}</section>
+      {bonusMode && <section className="review-section"><div className="review-section-heading"><div><span className="eyebrow">Decision history</span><h3>Bonus audit trail</h3></div></div>{decisions.length ? <div className="decision-history">{decisions.map((decision) => <div key={decision.id}><strong>{decision.decision}</strong><span>{decision.credited_agent_name || "No credited agent"}</span><small>{decision.reason} · {formatNoteTime(decision.decided_at)}</small></div>)}</div> : <span className="muted">No manual decisions. Automatic rules currently control this lead.</span>}</section>}
     </div>}
-    <footer className="review-modal-footer"><div className="review-navigation"><button className="button secondary" onClick={onPrevious}><ChevronLeft size={16} />Previous</button><button className="button secondary" onClick={onNext}>Next lead<ChevronRight size={16} /></button></div><div className="review-decisions">{canManage && row?.bonus_state !== "retracted" && <button className="button reject-button" disabled={busy} onClick={onReject}>Reject / retract</button>}{canManage && row?.original_live_status && row?.bonus_state !== "payable" && row?.bonus_state !== "retracted" && <button className="button primary" disabled={busy} onClick={onApprove}>Approve bonus</button>}{!canManage && <span className="muted">Manager or admin access is required to decide.</span>}</div></footer>
+    <footer className="review-modal-footer"><div className="review-navigation"><button className="button secondary" onClick={onPrevious}><ChevronLeft size={16} />Previous</button><button className="button secondary" onClick={onNext}>Next lead<ChevronRight size={16} /></button></div>{bonusMode && <div className="review-decisions">{canManage && row?.bonus_state !== "retracted" && <button className="button reject-button" disabled={busy} onClick={onReject}>Reject / retract</button>}{canManage && row?.original_live_status && row?.bonus_state !== "payable" && row?.bonus_state !== "retracted" && <button className="button primary" disabled={busy} onClick={onApprove}>Approve bonus</button>}{!canManage && <span className="muted">Manager or admin access is required to decide.</span>}</div>}</footer>
   </section></div>;
 }
 
@@ -252,17 +283,65 @@ function NoteCard({ row }) {
 
 export function LeadsView({ data, page, setPage }) {
   const rows = data?.rows || [];
-  return <article className="panel report-panel"><div className="panel-heading"><div><span className="eyebrow">Lead directory</span><h3>Leads in the selected cohort</h3></div><button className="button secondary" onClick={() => downloadCsv("ricochet-leads.csv", rows)}><Download size={15} />Export visible</button></div>{!rows.length ? <Empty message="No leads matched these filters." /> : <div className="table-wrap"><table><thead><tr><th>Lead</th><th>Status</th><th>Type</th><th>Vendor</th><th>Agent</th><th>Location</th><th>Activity date</th></tr></thead><tbody>{rows.map((row) => <tr key={row.id}><td><strong>{fullName(row)}</strong><small>{row.phone || ""}{row.email ? ` · ${row.email}` : ""}</small></td><td><span className="tag">{value(row, "lead_status")}</span></td><td>{value(row, "lead_type")}</td><td>{value(row, "vendor")}</td><td>{value(row, "user_name")}</td><td>{[row.city, row.property_state, row.property_zip].filter(Boolean).join(", ") || "—"}</td><td>{value(row, "lead_date")}</td></tr>)}</tbody></table></div>}<Pager data={data} page={page} setPage={setPage} /></article>;
+  const [selectedLeadId, setSelectedLeadId] = useState(null);
+  return <><article className="panel report-panel"><div className="panel-heading"><div><span className="eyebrow">Lead directory</span><h3>Leads in the selected cohort</h3><p>Click any lead to view its complete notes, call owners, recordings, and timeline.</p></div><button className="button secondary" onClick={() => downloadCsv("ricochet-leads.csv", rows)}><Download size={15} />Export visible</button></div>{!rows.length ? <Empty message="No leads matched these filters." /> : <div className="table-wrap"><table><thead><tr><th>Lead</th><th>Status</th><th>Type</th><th>Vendor</th><th>Agent</th><th>Location</th><th>Activity date</th></tr></thead><tbody>{rows.map((row) => <tr key={row.id}><td><button className="lead-review-link" onClick={() => setSelectedLeadId(row.id)}><strong>{fullName(row)}</strong><small>{row.phone || ""}{row.email ? ` · ${row.email}` : ""} · Open full record</small></button></td><td><span className="tag">{value(row, "lead_status")}</span></td><td>{value(row, "lead_type")}</td><td>{value(row, "vendor")}</td><td>{value(row, "user_name")}</td><td>{[row.city, row.property_state, row.property_zip].filter(Boolean).join(", ") || "—"}</td><td>{value(row, "lead_date")}</td></tr>)}</tbody></table></div>}<Pager data={data} page={page} setPage={setPage} /></article>{selectedLeadId && <LeadReviewPopup rows={rows} selectedLeadId={selectedLeadId} setSelectedLeadId={setSelectedLeadId} />}</>;
 }
 
 export function CsvView({ setToast }) {
-  const [rows, setRows] = useState([]); const [matches, setMatches] = useState([]); const [busy, setBusy] = useState(false); const [exporting, setExporting] = useState(false); const [error, setError] = useState("");
-  const summary = useMemo(() => ({ matched: matches.filter((row) => row.match_status === "MATCHED").length, missing: matches.filter((row) => row.match_status !== "MATCHED").length }), [matches]);
-  const choose = async (event) => { setError(""); setMatches([]); try { const file = event.target.files?.[0]; if (!file) return; setRows(parseLeadCsv(await file.text())); } catch (cause) { setError(cause.message); } };
-  const run = async () => { setBusy(true); setError(""); try { const output = []; for (let index = 0; index < rows.length; index += 200) output.push(...await matchCsvRows(rows.slice(index, index + 200))); setMatches(output); setToast(`${number(output.length)} CSV rows checked.`); } catch (cause) { setError(cause.message); } finally { setBusy(false); } };
-  const exportCalls = async () => { setExporting(true); setError(""); try { const ids = [...new Set(matches.map((row) => Number(row.lead_id || 0)).filter(Boolean))]; const output = []; for (let index = 0; index < ids.length; index += 100) output.push(...await loadCsvCallDetails(ids.slice(index, index + 100))); downloadCsv("ricochet-csv-call-details.csv", output); setToast(`${number(output.length)} call rows exported.`); } catch (cause) { setError(cause.message); } finally { setExporting(false); } };
-  return <div className="csv-layout"><article className="panel upload-panel"><div className="upload-icon"><FileUp size={25} /></div><span className="eyebrow">CSV lead filter</span><h2>Match a lead list without another key</h2><p>Accepted headers include first_name, last_name, email, and phone_number. Phone is matched first, then email.</p><label className="file-button"><input type="file" accept=".csv,text/csv" onChange={choose} />Choose CSV</label>{rows.length > 0 && <div className="upload-ready"><CheckCircle2 size={16} />{number(rows.length)} valid lead rows ready</div>}<ErrorBox message={error} /><button className="button primary" disabled={!rows.length || busy} onClick={run}>{busy ? "Matching in secure batches…" : "Run Supabase match"}</button></article>
-    <article className="panel csv-results"><div className="panel-heading"><div><span className="eyebrow">Results</span><h3>{matches.length ? `${number(summary.matched)} matched · ${number(summary.missing)} not found` : "Upload a CSV to begin"}</h3></div>{matches.length > 0 && <div className="panel-actions"><button className="button secondary" onClick={() => downloadCsv("ricochet-csv-lead-summary.csv", matches)}><Download size={15} />Lead summary</button><button className="button secondary" disabled={exporting} onClick={exportCalls}><Download size={15} />{exporting ? "Preparing calls…" : "Call details"}</button></div>}</div>{matches.length ? <div className="table-wrap"><table><thead><tr><th>CSV row</th><th>Name</th><th>Phone</th><th>Email</th><th>Match</th><th>Current status</th><th>Calls</th><th>Notes</th><th>Agent</th></tr></thead><tbody>{matches.map((row) => <tr key={row.row_number}><td>{row.row_number}</td><td>{[row.input_first_name, row.input_last_name].filter(Boolean).join(" ")}</td><td>{row.input_phone}</td><td>{row.input_email}</td><td><span className={row.match_status === "MATCHED" ? "match matched" : "match missing"}>{row.match_method || row.match_status}</span></td><td>{value(row, "lead_status")}</td><td>{number(row.call_count)}</td><td>{number(row.note_count)}</td><td>{value(row, "user_name")}</td></tr>)}</tbody></table></div> : <Empty message="Matching is done directly by an authorized Supabase function." />}</article></div>;
+  const emptyFilters = { search: "", match: "", status: "", type: "", vendor: "", agent: "" };
+  const [rows, setRows] = useState([]);
+  const [matches, setMatches] = useState([]);
+  const [filters, setFilters] = useState(emptyFilters);
+  const [selectedLeadId, setSelectedLeadId] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [error, setError] = useState("");
+  const summary = useMemo(() => ({ matched: matches.filter((row) => row.lead_id).length, missing: matches.filter((row) => !row.lead_id).length }), [matches]);
+  const options = useMemo(() => {
+    const values = (key) => [...new Set(matches.map((row) => String(row[key] || "").trim()).filter(Boolean))].sort((a,b) => a.localeCompare(b));
+    return { match: values("match_status"), status: values("lead_status"), type: values("lead_type"), vendor: values("vendor"), agent: values("user_name") };
+  }, [matches]);
+  const visibleMatches = useMemo(() => {
+    const search = filters.search.trim().toLowerCase();
+    return matches.filter((row) => {
+      if (filters.match && row.match_status !== filters.match) return false;
+      if (filters.status && row.lead_status !== filters.status) return false;
+      if (filters.type && row.lead_type !== filters.type) return false;
+      if (filters.vendor && row.vendor !== filters.vendor) return false;
+      if (filters.agent && row.user_name !== filters.agent) return false;
+      if (!search) return true;
+      return [row.lead_id,row.input_first_name,row.input_last_name,row.matched_first_name,row.matched_last_name,row.input_phone,row.matched_phone,row.input_email,row.matched_email,row.lead_status,row.lead_type,row.vendor,row.user_name].filter(Boolean).join(" ").toLowerCase().includes(search);
+    });
+  }, [matches, filters]);
+  const updateFilter = (key) => (event) => setFilters((current) => ({ ...current, [key]: event.target.value }));
+  const choose = async (event) => {
+    setError(""); setMatches([]); setFilters(emptyFilters); setSelectedLeadId(null);
+    try { const file = event.target.files?.[0]; if (!file) return; setRows(parseLeadCsv(await file.text())); }
+    catch (cause) { setError(cause.message); }
+  };
+  const run = async () => {
+    setBusy(true); setError(""); setMatches([]); setFilters(emptyFilters);
+    try {
+      const output = [];
+      for (let index = 0; index < rows.length; index += 50) output.push(...await matchCsvRows(rows.slice(index, index + 50)));
+      setMatches(output); setToast(`${number(output.length)} CSV rows checked.`);
+    } catch (cause) { setError(cause.message); }
+    finally { setBusy(false); }
+  };
+  const exportCalls = async () => {
+    setExporting(true); setError("");
+    try {
+      const ids = [...new Set(visibleMatches.map((row) => Number(row.lead_id || 0)).filter(Boolean))];
+      const output = [];
+      for (let index = 0; index < ids.length; index += 100) output.push(...await loadCsvCallDetails(ids.slice(index, index + 100)));
+      downloadCsv("ricochet-csv-call-details.csv", output); setToast(`${number(output.length)} filtered call rows exported.`);
+    } catch (cause) { setError(cause.message); }
+    finally { setExporting(false); }
+  };
+  return <><div className="csv-layout"><article className="panel upload-panel"><div className="upload-icon"><FileUp size={25} /></div><span className="eyebrow">CSV lead filter</span><h2>Match a lead list without another key</h2><p>Accepted headers include first_name, last_name, email, and phone_number. Phone is matched first, then email. Matching runs in small optimized batches.</p><label className="file-button"><input type="file" accept=".csv,text/csv" onChange={choose} />Choose CSV</label>{rows.length > 0 && <div className="upload-ready"><CheckCircle2 size={16} />{number(rows.length)} valid lead rows ready</div>}<ErrorBox message={error} /><button className="button primary" disabled={!rows.length || busy} onClick={run}>{busy ? "Matching in secure batches…" : "Run Supabase match"}</button></article>
+    <article className="panel csv-results"><div className="panel-heading"><div><span className="eyebrow">Results</span><h3>{matches.length ? `${number(summary.matched)} matched · ${number(summary.missing)} not found` : "Upload a CSV to begin"}</h3>{matches.length > 0 && <p>{number(visibleMatches.length)} of {number(matches.length)} rows visible after filters</p>}</div>{matches.length > 0 && <div className="panel-actions"><button className="button secondary" disabled={!visibleMatches.length} onClick={() => downloadCsv("ricochet-csv-lead-summary-filtered.csv", visibleMatches)}><Download size={15} />Export filtered</button><button className="button secondary" disabled={exporting || !visibleMatches.some((row) => row.lead_id)} onClick={exportCalls}><Download size={15} />{exporting ? "Preparing calls…" : "Filtered calls"}</button></div>}</div>
+      {matches.length > 0 && <div className="csv-filter-bar"><label className="csv-search"><span>Search matched leads</span><input value={filters.search} onChange={updateFilter("search")} placeholder="Name, phone, email, lead ID…" /></label>{[["match","Match"],["status","Status"],["type","Lead type"],["vendor","Vendor"],["agent","Agent"]].map(([key,label]) => <label key={key}><span>{label}</span><select value={filters[key]} onChange={updateFilter(key)}><option value="">All {label.toLowerCase()}</option>{options[key].map((item) => <option value={item} key={item}>{item.replaceAll("_"," ")}</option>)}</select></label>)}<button className="button secondary csv-reset" onClick={() => setFilters(emptyFilters)}>Reset</button></div>}
+      {matches.length ? visibleMatches.length ? <div className="table-wrap"><table><thead><tr><th>CSV row</th><th>Lead</th><th>Phone</th><th>Email</th><th>Match</th><th>Current status</th><th>Type</th><th>Calls</th><th>Notes</th><th>Agent</th></tr></thead><tbody>{visibleMatches.map((row) => { const matchedName = [row.matched_first_name,row.matched_last_name].filter(Boolean).join(" "); const inputName = [row.input_first_name,row.input_last_name].filter(Boolean).join(" "); return <tr key={row.row_number}><td>{row.row_number}</td><td>{row.lead_id ? <button className="lead-review-link" onClick={() => setSelectedLeadId(Number(row.lead_id))}><strong>{matchedName || inputName || `Lead ${row.lead_id}`}</strong><small>ID {row.lead_id} · Open full record</small></button> : <><strong>{inputName || "Unknown input"}</strong><small>Not found</small></>}</td><td>{row.matched_phone || row.input_phone}</td><td>{row.matched_email || row.input_email}</td><td><span className={row.lead_id ? "match matched" : "match missing"}>{row.match_method || row.match_status}</span></td><td>{value(row,"lead_status")}</td><td>{value(row,"lead_type")}</td><td>{number(row.call_count)}</td><td>{number(row.note_count)}</td><td>{value(row,"user_name")}</td></tr>; })}</tbody></table></div> : <Empty message="No CSV results match the selected search and filters." /> : <Empty message="Matching is done directly by an authorized Supabase function." />}</article></div>{selectedLeadId && <LeadReviewPopup rows={visibleMatches} selectedLeadId={selectedLeadId} setSelectedLeadId={setSelectedLeadId} />}</>;
 }
 
 export function TeacherView({ data, page, setPage, setToast }) {
