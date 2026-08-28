@@ -73,7 +73,12 @@ export async function loadFilterOptions(from, to) {
 }
 
 export async function matchCsvRows(rows) {
-  const { data, error } = await requiredClient().rpc("dashboard_csv_match", { p_rows: rows });
+  let response = await requiredClient().rpc("dashboard_csv_match", { p_rows: rows });
+  if (response.error && /statement timeout|canceling statement/i.test(response.error.message || "")) {
+    await wait(600);
+    response = await requiredClient().rpc("dashboard_csv_match", { p_rows: rows });
+  }
+  const { data, error } = response;
   if (error) throw new Error(error.message || "CSV matching failed.");
   return Array.isArray(data) ? data : data?.rows || [];
 }
