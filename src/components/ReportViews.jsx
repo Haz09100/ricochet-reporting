@@ -1,7 +1,7 @@
 import { Bot, CheckCircle2, ChevronLeft, ChevronRight, Download, FileUp, Headphones, RefreshCw, Search, Sparkles, TriangleAlert, Users, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { parseLeadCsv, downloadCsv } from "../lib/csv.js";
-import { loadCsvCallDetails, loadLiveBonusReview, matchCsvRows, runAiAction, setLiveBonusDecision } from "../lib/reportApi.js";
+import { loadAllFilteredLeads, loadCsvCallDetails, loadLiveBonusReview, matchCsvRows, runAiAction, setLiveBonusDecision } from "../lib/reportApi.js";
 import AudioPlayer from "./AudioPlayer.jsx";
 
 const number = (value, digits = 0) => Number(value || 0).toLocaleString(undefined, { maximumFractionDigits: digits });
@@ -281,10 +281,41 @@ function NoteCard({ row }) {
   return <article className={`note-card compact-note-card${live ? " live-lead-note" : ""}`}><div className="note-top"><div><h3>{fullName(row)}</h3><div className="tag-row"><span className={`tag${live ? " live-tag" : ""}`}>{value(row, "lead_status")}</span><span className="tag quiet">{displayedLeadType(row, notes)}</span></div></div><span className="note-count">{number(notes.length)} notes</span></div>{latest ? <NoteEntry note={latest} latest live={live} /> : <span className="muted">No readable note was synchronized.</span>}{older.length > 0 && <details className="older-notes"><summary>View {number(older.length)} older notes</summary><div className="older-note-list">{older.map((note, index) => <NoteEntry note={note} key={`${noteKey(note)}-${index}`} />)}</div></details>}<details className="timeline"><summary><Headphones size={14} />All related recordings · {row.recordings?.length || 0}</summary>{(row.recordings || []).length ? row.recordings.map((call) => <div className="timeline-row" key={call.id}><div><strong>{call.exact_match ? "Latest exact note match" : value(call, "call_date_time")}</strong><span>{value(call, "user_name")} · {duration(call.duration_seconds)} · {value(call, "direction")}</span></div><AudioPlayer compact callUuid={call.call_uuid} /></div>) : <span className="muted">No playable recordings are synchronized for this lead.</span>}</details></article>;
 }
 
-export function LeadsView({ data, page, setPage }) {
+function leadExportRow(row) {
+  return {
+    "Lead ID": row.id,
+    Name: fullName(row),
+    Address: [row.address, row.address_2].filter(Boolean).join(" "),
+    City: row.city || "",
+    State: row.property_state || "",
+    ZIP: row.property_zip || "",
+    County: row.county || "",
+    "Metro Area": row.metro || "",
+    Email: row.email || "",
+    Phone: row.phone || "",
+    "Current Status": row.lead_status || "",
+    "Lead Type": row.lead_type || "",
+    Vendor: row.vendor || "",
+    Agent: row.user_name || "",
+    "Activity Date": row.lead_date || "",
+  };
+}
+
+export function LeadsView({ data, filters, page, setPage, setToast }) {
   const rows = data?.rows || [];
   const [selectedLeadId, setSelectedLeadId] = useState(null);
-  return <><article className="panel report-panel"><div className="panel-heading"><div><span className="eyebrow">Lead directory</span><h3>Leads in the selected cohort</h3><p>Click any lead to view its complete notes, call owners, recordings, and timeline.</p></div><button className="button secondary" onClick={() => downloadCsv("ricochet-leads.csv", rows)}><Download size={15} />Export visible</button></div>{!rows.length ? <Empty message="No leads matched these filters." /> : <div className="table-wrap"><table><thead><tr><th>Lead</th><th>Status</th><th>Type</th><th>Vendor</th><th>Agent</th><th>Location</th><th>Activity date</th></tr></thead><tbody>{rows.map((row) => <tr key={row.id}><td><button className="lead-review-link" onClick={() => setSelectedLeadId(row.id)}><strong>{fullName(row)}</strong><small>{row.phone || ""}{row.email ? ` · ${row.email}` : ""} · Open full record</small></button></td><td><span className="tag">{value(row, "lead_status")}</span></td><td>{value(row, "lead_type")}</td><td>{value(row, "vendor")}</td><td>{value(row, "user_name")}</td><td>{[row.city, row.property_state, row.property_zip].filter(Boolean).join(", ") || "—"}</td><td>{value(row, "lead_date")}</td></tr>)}</tbody></table></div>}<Pager data={data} page={page} setPage={setPage} /></article>{selectedLeadId && <LeadReviewPopup rows={rows} selectedLeadId={selectedLeadId} setSelectedLeadId={setSelectedLeadId} />}</>;
+  const [exporting, setExporting] = useState(false);
+  const [exportProgress, setExportProgress] = useState("");
+  const exportAll = async () => {
+    setExporting(true); setExportProgress("Preparing…");
+    try {
+      const output = await loadAllFilteredLeads(filters, (loaded, total) => setExportProgress(`${number(loaded)} of ${number(total)}`));
+      downloadCsv("ricochet-all-filtered-leads.csv", output.map(leadExportRow));
+      setToast(`${number(output.length)} filtered leads exported with county and metro.`);
+    } catch (cause) { setToast(cause.message, true); }
+    finally { setExporting(false); setExportProgress(""); }
+  };
+  return <><article className="panel report-panel"><div className="panel-heading"><div><span className="eyebrow">Lead directory</span><h3>Leads in the selected cohort</h3><p>Click any lead to view its complete notes, call owners, recordings, and timeline. County and metro come from the attached Zillow ZIP geography.</p></div><button className="button secondary" disabled={exporting || !Number(data?.total || 0)} onClick={exportAll}><Download size={15} />{exporting ? `Exporting ${exportProgress}` : "Export all filtered"}</button></div>{!rows.length ? <Empty message="No leads matched these filters." /> : <div className="table-wrap"><table><thead><tr><th>Lead</th><th>Status</th><th>Type</th><th>Vendor</th><th>Agent</th><th>Address</th><th>County</th><th>Metro area</th><th>Activity date</th></tr></thead><tbody>{rows.map((row) => <tr key={row.id}><td><button className="lead-review-link" onClick={() => setSelectedLeadId(row.id)}><strong>{fullName(row)}</strong><small>{row.phone || ""}{row.email ? ` · ${row.email}` : ""} · Open full record</small></button></td><td><span className="tag">{value(row, "lead_status")}</span></td><td>{value(row, "lead_type")}</td><td>{value(row, "vendor")}</td><td>{value(row, "user_name")}</td><td>{[row.address, row.address_2, row.city, row.property_state, row.property_zip].filter(Boolean).join(", ") || "—"}</td><td>{row.county || "Unmapped"}</td><td>{row.metro || "Unmapped"}</td><td>{value(row, "lead_date")}</td></tr>)}</tbody></table></div>}<Pager data={data} page={page} setPage={setPage} /></article>{selectedLeadId && <LeadReviewPopup rows={rows} selectedLeadId={selectedLeadId} setSelectedLeadId={setSelectedLeadId} />}</>;
 }
 
 export function CsvView({ setToast }) {
@@ -350,11 +381,11 @@ export function TeacherView({ data, page, setPage, setToast }) {
   return <><div className="teacher-actions"><div><span className="eyebrow">AI teacher review</span><h2>Manager review queue</h2><p>Read-only review data comes from Supabase. Paid AI, recording, and D1 corrections remain behind the private Worker bridge.</p></div><button className="button primary" onClick={audit}><Sparkles size={16} />Run paid audit</button></div><div className="metric-grid teacher-metrics">{[["Reviewed",totals.reviewed,"green"],["Needs review",totals.needs_review,"gold"],["Queued",totals.queued,"blue"],["Processing",totals.processing,"violet"]].map(([label, amount, tone]) => <article className={`metric-card ${tone}`} key={label}><span>{label}</span><strong>{number(amount)}</strong><small>Selected range</small></article>)}</div><article className="panel report-panel"><div className="panel-heading"><div><span className="eyebrow">Review queue</span><h3>Calls needing manager attention</h3></div></div>{data?.rows?.length ? <div className="table-wrap"><table><thead><tr><th>Lead</th><th>Call</th><th>Agent</th><th>Trigger</th><th>Score</th><th>Recording</th></tr></thead><tbody>{data.rows.map((row) => <tr key={row.call_event_id}><td>{fullName(row)}</td><td>{row.call_date_time}</td><td>{row.user_name}</td><td>{row.trigger_reason}</td><td>{number(row.ai_agent_score)}</td><td><AudioPlayer compact callUuid={row.call_uuid} /></td></tr>)}</tbody></table></div> : <Empty message="No AI reviews match these filters." />}<Pager data={data} page={page} setPage={setPage} /></article></>;
 }
 
-export function ViewRouter({ page, data, pagination, setPagination, setToast, onDataChanged }) {
+export function ViewRouter({ page, data, filters, pagination, setPagination, setToast, onDataChanged }) {
   if (page === "team") return <TeamView data={data} setToast={setToast} onDataChanged={onDataChanged} />;
   if (page === "calls") return <CallsView data={data} page={pagination.page} setPage={(pageNumber) => setPagination({ ...pagination, page: pageNumber })} setToast={setToast} />;
   if (page === "notes") return <NotesView data={data} page={pagination.page} setPage={(pageNumber) => setPagination({ ...pagination, page: pageNumber })} />;
-  if (page === "leads") return <LeadsView data={data} page={pagination.page} setPage={(pageNumber) => setPagination({ ...pagination, page: pageNumber })} />;
+  if (page === "leads") return <LeadsView data={data} filters={filters} page={pagination.page} setPage={(pageNumber) => setPagination({ ...pagination, page: pageNumber })} setToast={setToast} />;
   if (page === "csv") return <CsvView setToast={setToast} />;
   if (page === "teacher") return <TeacherView data={data} page={pagination.page} setPage={(pageNumber) => setPagination({ ...pagination, page: pageNumber })} setToast={setToast} />;
   return <OverviewView data={data} />;
