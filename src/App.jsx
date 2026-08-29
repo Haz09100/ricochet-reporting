@@ -24,7 +24,7 @@ import { ViewRouter } from "./components/ReportViews.jsx";
 import { config, supabaseConfigured } from "./config.js";
 import { demoForPage } from "./demo.js";
 import { useAutoRefresh } from "./hooks/useAutoRefresh.js";
-import { loadFilterOptions, loadReportPage } from "./lib/reportApi.js";
+import { loadFilterOptions, loadGeoOptions, loadReportPage } from "./lib/reportApi.js";
 import { supabase } from "./lib/supabase.js";
 
 const navigation = [
@@ -60,6 +60,11 @@ const initialFilters = {
   leadType: "",
   state: "",
   city: "",
+  counties: [],
+  metros: [],
+  geoState: "",
+  countyFilterActive: false,
+  metroFilterActive: false,
   appointmentType: "",
   sourceDescription: "",
   addressQuality: "",
@@ -70,8 +75,20 @@ const initialFilters = {
 };
 
 const defaultOptions = { statuses: [], agents: [], vendors: [], lead_types: [], states: [], cities: [], source_descriptions: [] };
+const defaultGeoOptions = { state: "", counties: [], metros: [], mapped_zip_codes: 0 };
 
-function FilterPanel({ draft, setDraft, apply, options, open, setOpen }) {
+function MultiSelectChecklist({ label, noun, choices, selected, disabled, onChange }) {
+  const selectedSet = new Set(selected || []);
+  const allSelected = choices.length > 0 && selectedSet.size === choices.length;
+  const summary = disabled ? "Select a state first" : allSelected ? `All ${choices.length} ${noun}` : selectedSet.size ? `${selectedSet.size} of ${choices.length} selected` : `No ${noun} selected`;
+  const update = (value, checked) => {
+    const next = checked ? [...selectedSet, value] : [...selectedSet].filter((item) => item !== value);
+    onChange(choices.filter((item) => next.includes(item)), next.length !== choices.length);
+  };
+  return <div className="multi-filter"><span>{label}</span><details className={disabled ? "disabled" : ""}><summary>{summary}</summary>{!disabled && <div className="multi-filter-menu"><div className="multi-filter-actions"><button type="button" onClick={() => onChange([...choices], false)}>Select all</button><button type="button" onClick={() => onChange([], true)}>Clear</button></div><div className="multi-filter-options">{choices.map((choice) => <label key={choice}><input type="checkbox" checked={selectedSet.has(choice)} onChange={(event) => update(choice, event.target.checked)} />{choice}</label>)}</div></div>}</details></div>;
+}
+
+function FilterPanel({ draft, setDraft, apply, options, geoOptions, open, setOpen }) {
   const select = (label, field, choices, allLabel) => <label>{label}<select value={draft[field]} onChange={(event) => setDraft({ ...draft, [field]: event.target.value })}><option value="">{allLabel}</option>{(choices || []).map((choice) => {
     const id = typeof choice === "object" ? choice.value ?? choice.id ?? choice.name : choice;
     const text = typeof choice === "object" ? choice.label ?? choice.name ?? choice.value : choice;
@@ -93,7 +110,9 @@ function FilterPanel({ draft, setDraft, apply, options, open, setOpen }) {
       {select("Agent", "agent", options.agents, "All agents")}
       {select("Vendor", "vendor", options.vendors, "All vendors")}
       {select("Lead type", "leadType", options.lead_types, "All lead types")}
-      {select("State", "state", options.states, "All states")}
+      <label>State<select value={draft.state} onChange={(event) => setDraft({ ...draft, state: event.target.value, city: "", counties: [], metros: [], geoState: "", countyFilterActive: false, metroFilterActive: false })}><option value="">All states</option>{(options.states || []).map((choice) => <option key={choice} value={choice}>{choice}</option>)}</select></label>
+      <MultiSelectChecklist label="Counties" noun="counties" choices={geoOptions.counties || []} selected={draft.counties} disabled={!draft.state || draft.geoState !== draft.state} onChange={(counties, countyFilterActive) => setDraft({ ...draft, counties, countyFilterActive })} />
+      <MultiSelectChecklist label="Metro areas" noun="metros" choices={geoOptions.metros || []} selected={draft.metros} disabled={!draft.state || draft.geoState !== draft.state} onChange={(metros, metroFilterActive) => setDraft({ ...draft, metros, metroFilterActive })} />
       {select("City", "city", options.cities, "All cities")}
       {select("Appointment type from note", "appointmentType", ["In person", "Phone call", "Virtual", "Other / unclear", "Not provided"], "All appointment types")}
       {select("Original lead description", "sourceDescription", options.source_descriptions, "All descriptions")}
@@ -129,6 +148,7 @@ export default function App() {
   const [draftFilters, setDraftFilters] = useState(initialFilters);
   const [filters, setFilters] = useState(initialFilters);
   const [options, setOptions] = useState(defaultOptions);
+  const [geoOptions, setGeoOptions] = useState(defaultGeoOptions);
   const [pagination, setPagination] = useState({ page: 1, pageSize: 50 });
   const [data, setData] = useState(() => preview ? demoForPage("overview") : null);
   const [loading, setLoading] = useState(false);
@@ -182,6 +202,25 @@ export default function App() {
     if (preview || !session) return;
     loadFilterOptions(filters.from, filters.to).then((next) => setOptions({ ...defaultOptions, ...next })).catch(() => {});
   }, [filters.from, filters.to, preview, session]);
+  useEffect(() => {
+    const state = draftFilters.state;
+    if (preview || !session || !state) { setGeoOptions(defaultGeoOptions); return undefined; }
+    let current = true;
+    loadGeoOptions(state).then((next) => {
+      if (!current) return;
+      const normalized = { ...defaultGeoOptions, ...next };
+      setGeoOptions(normalized);
+      setDraftFilters((draft) => draft.state !== state || draft.geoState === state ? draft : {
+        ...draft,
+        counties: normalized.counties,
+        metros: normalized.metros,
+        geoState: state,
+        countyFilterActive: false,
+        metroFilterActive: false,
+      });
+    }).catch((cause) => { if (current) setToast(cause.message, true); });
+    return () => { current = false; };
+  }, [draftFilters.state, preview, session, setToast]);
 
   const remaining = useAutoRefresh({ enabled: autoRefresh && Boolean(preview || session) && !["csv", "settings"].includes(page), seconds: config.autoRefreshSeconds, onRefresh: load });
   const applyFilters = () => {
@@ -204,10 +243,10 @@ export default function App() {
     <main className="main-shell">
       <header className="topbar"><button className="icon-button mobile-menu" onClick={() => setSidebarOpen(!sidebarOpen)} aria-label="Open navigation"><Menu size={19} /></button><div className="page-heading"><h1>{title}</h1><p>Supabase reporting with private AI and recording actions.</p></div><div className="top-actions"><button className={autoRefresh ? "auto-status on" : "auto-status"} onClick={() => setAutoRefresh(!autoRefresh)} title="Toggle automatic refresh"><BellRing size={14} /><span>{autoRefresh ? `Refresh in ${remaining}s` : "Auto refresh off"}</span></button><button className="button secondary" disabled={loading || ["csv", "settings"].includes(page)} onClick={() => load({ force: true })}><RefreshCw className={loading ? "spin" : ""} size={15} />Refresh</button><button className="icon-button" onClick={() => setDark(!dark)} aria-label="Toggle dark mode">{dark ? <Sun size={17} /> : <Moon size={17} />}</button><div className="avatar">{preview ? "DE" : String(session?.user?.email || "U").slice(0, 2).toUpperCase()}</div></div></header>
       <section className="content">
-        {!['csv','settings'].includes(page) && <FilterPanel draft={draftFilters} setDraft={setDraftFilters} apply={applyFilters} options={options} open={filtersOpen} setOpen={setFiltersOpen} />}
+        {!['csv','settings'].includes(page) && <FilterPanel draft={draftFilters} setDraft={setDraftFilters} apply={applyFilters} options={options} geoOptions={geoOptions} open={filtersOpen} setOpen={setFiltersOpen} />}
         {preview && <div className="preview-banner">Visual preview data is active. Add the GitHub repository variables and run the Supabase SQL before publishing.</div>}
         {error && <div className="error-box page-error"><X size={17} /><span>{error}</span><button onClick={() => load()}>Try again</button></div>}
-        {loading ? <div className="loading-panel"><RefreshCw className="spin" /><strong>Loading {title.toLowerCase()}…</strong><span>Directly from secured Supabase report functions</span></div> : page === "settings" ? <ConnectionsView session={session} preview={preview} /> : <ViewRouter page={page} data={data || {}} pagination={pagination} setPagination={setPagination} setToast={setToast} onDataChanged={() => load({ force: true })} />}
+        {loading ? <div className="loading-panel"><RefreshCw className="spin" /><strong>Loading {title.toLowerCase()}…</strong><span>Directly from secured Supabase report functions</span></div> : page === "settings" ? <ConnectionsView session={session} preview={preview} /> : <ViewRouter page={page} data={data || {}} filters={filters} pagination={pagination} setPagination={setPagination} setToast={setToast} onDataChanged={() => load({ background: true, force: true })} />}
         <footer className="report-footer"><span>Data: Supabase · Sync source: D1</span><span>{lastUpdated ? `Updated ${lastUpdated.toLocaleTimeString()}` : "Waiting for first refresh"}</span></footer>
       </section>
     </main>
