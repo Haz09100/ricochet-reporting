@@ -81,13 +81,13 @@ export async function loadGeoOptions(state) {
   return data || { state, counties: [], metros: [], mapped_zip_codes: 0 };
 }
 
-export async function loadAllFilteredLeads(filters, onProgress) {
+export async function loadAllFilteredLeads(filters, selectedFields = [], onProgress) {
   const output = [];
   let page = 1;
   let total = Number.POSITIVE_INFINITY;
   while (output.length < total) {
-    const params = reportParameters(filters, { page, pageSize: 1000 });
-    const { data, error } = await requiredClient().rpc("dashboard_leads", params);
+    const params = { ...reportParameters(filters, { page, pageSize: 250 }), p_fields: selectedFields };
+    const { data, error } = await requiredClient().rpc("dashboard_lead_export", params);
     if (error) throw new Error(error.message || "Could not prepare the full lead export.");
     const rows = Array.isArray(data?.rows) ? data.rows : [];
     total = Number(data?.total || 0);
