@@ -30,6 +30,8 @@ export function reportParameters(filters, extra = {}) {
       lead_type: filters.leadType,
       state: filters.state,
       city: filters.city,
+      ...(filters.countyFilterActive ? { counties: filters.counties || [] } : {}),
+      ...(filters.metroFilterActive ? { metros: filters.metros || [] } : {}),
       appointment_type: filters.appointmentType,
       source_description: filters.sourceDescription,
       address_quality: filters.addressQuality,
@@ -70,6 +72,32 @@ export async function loadFilterOptions(from, to) {
   const { data, error } = await requiredClient().rpc("dashboard_filter_options", { p_from: from, p_to: to });
   if (error) throw new Error(error.message || "Could not load filter choices.");
   return data || {};
+}
+
+export async function loadGeoOptions(state) {
+  if (!state) return { state: "", counties: [], metros: [], mapped_zip_codes: 0 };
+  const { data, error } = await requiredClient().rpc("dashboard_geo_options", { p_state: state });
+  if (error) throw new Error(error.message || "Could not load county and metro choices.");
+  return data || { state, counties: [], metros: [], mapped_zip_codes: 0 };
+}
+
+export async function loadAllFilteredLeads(filters, onProgress) {
+  const output = [];
+  let page = 1;
+  let total = Number.POSITIVE_INFINITY;
+  while (output.length < total) {
+    const params = reportParameters(filters, { page, pageSize: 1000 });
+    const { data, error } = await requiredClient().rpc("dashboard_leads", params);
+    if (error) throw new Error(error.message || "Could not prepare the full lead export.");
+    const rows = Array.isArray(data?.rows) ? data.rows : [];
+    total = Number(data?.total || 0);
+    output.push(...rows);
+    onProgress?.(Math.min(output.length, total), total);
+    if (!rows.length || output.length >= total) break;
+    page += 1;
+    if (page > 250) throw new Error("The export exceeded the safe page limit. Narrow the filters and try again.");
+  }
+  return output;
 }
 
 export async function matchCsvRows(rows) {
