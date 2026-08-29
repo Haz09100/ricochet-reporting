@@ -126,6 +126,9 @@ input:focus, select:focus { border-color: #17a98a; box-shadow: 0 0 0 3px rgba(23
 .table-wrap { width: 100%; overflow: auto; }
 table { width: 100%; border-collapse: collapse; min-width: 880px; font-size: 11px; }
 th { padding: 11px 14px; background: #f3f6fa; color: #6f819a; text-align: left; text-transform: uppercase; letter-spacing: .06em; font-size: 9px; white-space: nowrap; }
+.sort-header { width: 100%; display: inline-flex; align-items: center; justify-content: space-between; gap: 8px; border: 0; padding: 0; background: transparent; color: inherit; font: inherit; font-weight: 800; text-align: left; text-transform: inherit; letter-spacing: inherit; cursor: pointer; }
+.sort-header i { color: #9aabc0; font-size: 8px; font-style: normal; }
+.sort-header:hover, .sort-header.active { color: #176e5d; }.sort-header.active i { color: #176e5d; }
 td { padding: 12px 14px; border-top: 1px solid #e8edf4; color: #40526d; vertical-align: middle; }
 td strong, td small { display: block; } td strong { color: #22334d; } td small { color: #8391a6; margin-top: 3px; font-size: 9px; }
 tbody tr:hover { background: #fafbfd; }
