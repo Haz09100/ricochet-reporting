@@ -281,41 +281,77 @@ function NoteCard({ row }) {
   return <article className={`note-card compact-note-card${live ? " live-lead-note" : ""}`}><div className="note-top"><div><h3>{fullName(row)}</h3><div className="tag-row"><span className={`tag${live ? " live-tag" : ""}`}>{value(row, "lead_status")}</span><span className="tag quiet">{displayedLeadType(row, notes)}</span></div></div><span className="note-count">{number(notes.length)} notes</span></div>{latest ? <NoteEntry note={latest} latest live={live} /> : <span className="muted">No readable note was synchronized.</span>}{older.length > 0 && <details className="older-notes"><summary>View {number(older.length)} older notes</summary><div className="older-note-list">{older.map((note, index) => <NoteEntry note={note} key={`${noteKey(note)}-${index}`} />)}</div></details>}<details className="timeline"><summary><Headphones size={14} />All related recordings · {row.recordings?.length || 0}</summary>{(row.recordings || []).length ? row.recordings.map((call) => <div className="timeline-row" key={call.id}><div><strong>{call.exact_match ? "Latest exact note match" : value(call, "call_date_time")}</strong><span>{value(call, "user_name")} · {duration(call.duration_seconds)} · {value(call, "direction")}</span></div><AudioPlayer compact callUuid={call.call_uuid} /></div>) : <span className="muted">No playable recordings are synchronized for this lead.</span>}</details></article>;
 }
 
-function leadExportRow(row) {
-  return {
-    "Lead ID": row.id,
-    Name: fullName(row),
-    Address: [row.address, row.address_2].filter(Boolean).join(" "),
-    City: row.city || "",
-    State: row.property_state || "",
-    ZIP: row.property_zip || "",
-    County: row.county || "",
-    "Metro Area": row.metro || "",
-    Email: row.email || "",
-    Phone: row.phone || "",
-    "Current Status": row.lead_status || "",
-    "Lead Type": row.lead_type || "",
-    Vendor: row.vendor || "",
-    Agent: row.user_name || "",
-    "Activity Date": row.lead_date || "",
-  };
+const leadExportFields = [
+  { key: "lead_id", label: "Lead ID", defaultSelected: true, value: (row) => row.id },
+  { key: "name", label: "Name", defaultSelected: true, value: (row) => fullName(row) },
+  { key: "address", label: "Address", defaultSelected: true, value: (row) => [row.address, row.address_2].filter(Boolean).join(" ") },
+  { key: "city", label: "City", defaultSelected: true, value: (row) => row.city || "" },
+  { key: "state", label: "State", defaultSelected: true, value: (row) => row.property_state || "" },
+  { key: "zip", label: "ZIP", defaultSelected: true, value: (row) => row.property_zip || "" },
+  { key: "county", label: "County", defaultSelected: true, value: (row) => row.county || "" },
+  { key: "metro", label: "Metro Area", defaultSelected: true, value: (row) => row.metro || "" },
+  { key: "email", label: "Email", defaultSelected: true, value: (row) => row.email || "" },
+  { key: "phone", label: "Phone", defaultSelected: true, value: (row) => row.phone || "" },
+  { key: "status", label: "Current Status", defaultSelected: true, value: (row) => row.lead_status || "" },
+  { key: "type", label: "Lead Type", defaultSelected: true, value: (row) => row.lead_type || "" },
+  { key: "vendor", label: "Vendor", defaultSelected: true, value: (row) => row.vendor || "" },
+  { key: "agent", label: "Agent", defaultSelected: true, value: (row) => row.user_name || "" },
+  { key: "activity_date", label: "Activity Date", defaultSelected: true, value: (row) => row.lead_date || "" },
+  { key: "first_name", label: "First Name", value: (row) => row.first_name || "" },
+  { key: "last_name", label: "Last Name", value: (row) => row.last_name || "" },
+  { key: "address_1", label: "Address Line 1", value: (row) => row.address || "" },
+  { key: "address_2", label: "Address Line 2", value: (row) => row.address_2 || "" },
+  { key: "agent_id", label: "Agent ID", value: (row) => row.user_id || "" },
+  { key: "created_date", label: "Created Date", value: (row) => row.created_date || "" },
+  { key: "first_live_date", label: "First Live Date", value: (row) => row.first_live_date || "" },
+  { key: "live_email", label: "Live Email Sent", value: (row) => row.live_email_sent ? "Yes" : "No" },
+  { key: "fub_id", label: "Follow Up Boss ID", value: (row) => row.fub_id || "" },
+  { key: "source", label: "Source Description", value: (row) => row.source_lead_description || "" },
+  { key: "appointment", label: "Appointment Type", value: (row) => row.appointment_type || "" },
+  { key: "geo_source", label: "Geography Match Source", value: (row) => row.geo_match_method === "zip" ? "ZIP" : row.geo_match_method === "city_state_unique_county" ? "City/state fallback" : "Unmapped" },
+];
+
+const defaultLeadExportFields = leadExportFields.filter((field) => field.defaultSelected).map((field) => field.key);
+
+function leadExportRow(row, selectedFields) {
+  const selected = new Set(selectedFields);
+  return Object.fromEntries(leadExportFields.filter((field) => selected.has(field.key)).map((field) => [field.label, field.value(row)]));
+}
+
+function LeadExportDialog({ selectedFields, setSelectedFields, exporting, exportProgress, onClose, onExport }) {
+  useEffect(() => {
+    const closeOnEscape = (event) => { if (event.key === "Escape" && !exporting) onClose(); };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [exporting, onClose]);
+  const selected = new Set(selectedFields);
+  const toggle = (key) => setSelectedFields((current) => current.includes(key) ? current.filter((item) => item !== key) : [...current, key]);
+  return <div className="review-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !exporting) onClose(); }}><section className="review-modal export-modal" role="dialog" aria-modal="true" aria-labelledby="lead-export-title">
+    <header className="review-modal-header"><div><span className="eyebrow">Export filtered leads</span><h2 id="lead-export-title">Choose the CSV fields</h2><p>The fields in your current export stay selected by default. Add any optional fields you need.</p></div><button className="review-close" disabled={exporting} onClick={onClose} aria-label="Close export options"><X size={22} /></button></header>
+    <div className="export-modal-body"><div className="export-field-toolbar"><button className="button secondary" disabled={exporting} onClick={() => setSelectedFields(defaultLeadExportFields)}>Restore defaults</button><button className="button secondary" disabled={exporting} onClick={() => setSelectedFields(leadExportFields.map((field) => field.key))}>Select all</button><span>{number(selectedFields.length)} of {number(leadExportFields.length)} fields selected</span></div><div className="export-field-grid">{leadExportFields.map((field) => <label className="export-field-option" key={field.key}><input type="checkbox" checked={selected.has(field.key)} disabled={exporting} onChange={() => toggle(field.key)} /><span><strong>{field.label}</strong><small>{field.defaultSelected ? "Default field" : "Optional field"}</small></span></label>)}</div></div>
+    <footer className="review-modal-footer"><span className="muted">The CSV includes every lead matching the applied filters, not only this page.</span><div className="review-decisions"><button className="button secondary" disabled={exporting} onClick={onClose}>Cancel</button><button className="button primary" disabled={exporting || !selectedFields.length} onClick={onExport}><Download size={15} />{exporting ? `Exporting ${exportProgress}` : "Export CSV"}</button></div></footer>
+  </section></div>;
 }
 
 export function LeadsView({ data, filters, page, setPage, setToast }) {
   const rows = data?.rows || [];
   const [selectedLeadId, setSelectedLeadId] = useState(null);
+  const [showExportDialog, setShowExportDialog] = useState(false);
+  const [selectedExportFields, setSelectedExportFields] = useState(defaultLeadExportFields);
   const [exporting, setExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState("");
   const exportAll = async () => {
     setExporting(true); setExportProgress("Preparing…");
     try {
       const output = await loadAllFilteredLeads(filters, (loaded, total) => setExportProgress(`${number(loaded)} of ${number(total)}`));
-      downloadCsv("ricochet-all-filtered-leads.csv", output.map(leadExportRow));
+      downloadCsv("ricochet-all-filtered-leads.csv", output.map((row) => leadExportRow(row, selectedExportFields)));
       setToast(`${number(output.length)} filtered leads exported with county and metro.`);
+      setShowExportDialog(false);
     } catch (cause) { setToast(cause.message, true); }
     finally { setExporting(false); setExportProgress(""); }
   };
-  return <><article className="panel report-panel"><div className="panel-heading"><div><span className="eyebrow">Lead directory</span><h3>Leads in the selected cohort</h3><p>Click any lead to view its complete notes, call owners, recordings, and timeline. County and metro come from the attached Zillow ZIP geography.</p></div><button className="button secondary" disabled={exporting || !Number(data?.total || 0)} onClick={exportAll}><Download size={15} />{exporting ? `Exporting ${exportProgress}` : "Export all filtered"}</button></div>{!rows.length ? <Empty message="No leads matched these filters." /> : <div className="table-wrap"><table><thead><tr><th>Lead</th><th>Status</th><th>Type</th><th>Vendor</th><th>Agent</th><th>Address</th><th>County</th><th>Metro area</th><th>Activity date</th></tr></thead><tbody>{rows.map((row) => <tr key={row.id}><td><button className="lead-review-link" onClick={() => setSelectedLeadId(row.id)}><strong>{fullName(row)}</strong><small>{row.phone || ""}{row.email ? ` · ${row.email}` : ""} · Open full record</small></button></td><td><span className="tag">{value(row, "lead_status")}</span></td><td>{value(row, "lead_type")}</td><td>{value(row, "vendor")}</td><td>{value(row, "user_name")}</td><td>{[row.address, row.address_2, row.city, row.property_state, row.property_zip].filter(Boolean).join(", ") || "—"}</td><td>{row.county || "Unmapped"}</td><td>{row.metro || "Unmapped"}</td><td>{value(row, "lead_date")}</td></tr>)}</tbody></table></div>}<Pager data={data} page={page} setPage={setPage} /></article>{selectedLeadId && <LeadReviewPopup rows={rows} selectedLeadId={selectedLeadId} setSelectedLeadId={setSelectedLeadId} />}</>;
+  const openExport = () => { setSelectedExportFields(defaultLeadExportFields); setShowExportDialog(true); };
+  return <><article className="panel report-panel"><div className="panel-heading"><div><span className="eyebrow">Lead directory</span><h3>Leads in the selected cohort</h3><p>Click any lead to view its complete notes, call owners, recordings, and timeline. County and metro use ZIP first, then a unique city/state fallback.</p></div><button className="button secondary" disabled={exporting || !Number(data?.total || 0)} onClick={openExport}><Download size={15} />Export all filtered</button></div>{!rows.length ? <Empty message="No leads matched these filters." /> : <div className="table-wrap"><table><thead><tr><th>Lead</th><th>Status</th><th>Type</th><th>Vendor</th><th>Agent</th><th>Address</th><th>County</th><th>Metro area</th><th>Activity date</th></tr></thead><tbody>{rows.map((row) => <tr key={row.id}><td><button className="lead-review-link" onClick={() => setSelectedLeadId(row.id)}><strong>{fullName(row)}</strong><small>{row.phone || ""}{row.email ? ` · ${row.email}` : ""} · Open full record</small></button></td><td><span className="tag">{value(row, "lead_status")}</span></td><td>{value(row, "lead_type")}</td><td>{value(row, "vendor")}</td><td>{value(row, "user_name")}</td><td>{[row.address, row.address_2, row.city, row.property_state, row.property_zip].filter(Boolean).join(", ") || "—"}</td><td>{row.county ? <><span>{row.county}</span><small className="geo-source">{row.geo_match_method === "city_state_unique_county" ? "City/state fallback" : "ZIP match"}</small></> : "Unmapped"}</td><td>{row.metro || (row.geo_match_method === "city_state_unique_county" ? "Not uniquely mapped" : "Unmapped")}</td><td>{value(row, "lead_date")}</td></tr>)}</tbody></table></div>}<Pager data={data} page={page} setPage={setPage} /></article>{selectedLeadId && <LeadReviewPopup rows={rows} selectedLeadId={selectedLeadId} setSelectedLeadId={setSelectedLeadId} />}{showExportDialog && <LeadExportDialog selectedFields={selectedExportFields} setSelectedFields={setSelectedExportFields} exporting={exporting} exportProgress={exportProgress} onClose={() => setShowExportDialog(false)} onExport={exportAll} />}</>;
 }
 
 export function CsvView({ setToast }) {
