@@ -45,7 +45,7 @@ export const demoCalls = {
   page: 1,
   page_size: 50,
   rows: [
-    { id: 1001, first_name: "Miguel", last_name: "Cesar", phone: "8138022817", user_name: "Melissa Pujol", call_date_time: "Aug 25, 2026 4:18 PM", duration_seconds: 125, direction: "Outbound", call_status: "Completed", lead_status: "2.0 CONTACTED - Follow Up", recording_status: "available", call_uuid: "demo-call-0001", ai_analysis_status: "completed", ai_agent_score: 88 },
+    { id: 1001, first_name: "Miguel", last_name: "Cesar", phone: "8138022817", user_name: "Melissa Pujol", call_date_time: "Aug 25, 2026 4:18 PM", duration_seconds: 125, direction: "Outbound", call_status: "Completed", lead_status: "2.0 CONTACTED - Follow Up", recording_status: "available", call_uuid: "demo-call-0001", ai_analysis_status: "completed", ai_analysis_model: "gpt-5-mini", ai_agent_score: 88, ai_summary: "The agent reached the intended lead, discussed the follow-up, and established a clear next action.", ai_status_matches: true, ai_note_matches: true },
   ],
 };
 
