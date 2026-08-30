@@ -1,7 +1,7 @@
-import { Bot, CheckCircle2, ChevronLeft, ChevronRight, Download, FileUp, Headphones, RefreshCw, Search, Sparkles, TriangleAlert, Users, X } from "lucide-react";
+import { Bot, CheckCircle2, ChevronLeft, ChevronRight, Copy, Cpu, Download, Eye, FileUp, Headphones, RefreshCw, Search, Sparkles, TriangleAlert, Users, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { parseLeadCsv, downloadCsv } from "../lib/csv.js";
-import { loadAllFilteredLeads, loadCsvCallDetails, loadLiveBonusReview, matchCsvRows, runAiAction, setLiveBonusDecision } from "../lib/reportApi.js";
+import { loadAllFilteredCalls, loadAllFilteredLeads, loadCallAiReview, loadCsvCallDetails, loadLiveBonusReview, matchCsvRows, runAiAction, setLiveBonusDecision } from "../lib/reportApi.js";
 import AudioPlayer from "./AudioPlayer.jsx";
 
 const number = (value, digits = 0) => Number(value || 0).toLocaleString(undefined, { maximumFractionDigits: digits });
@@ -303,21 +303,146 @@ function LiveOwnershipReport({ data }) {
   </section>;
 }
 
-export function CallsView({ data, page, setPage, setToast }) {
+const callIsEligibleForAi = (row) => Boolean(row?.call_uuid) && Number(row?.duration_seconds || 0) >= 30;
+const callIsBusy = (row) => ["queued","processing","retry"].includes(String(row?.ai_analysis_status || "").toLowerCase()) || ["queued","downloading","transcribing","processing","retry"].includes(String(row?.ai_status || "").toLowerCase());
+const analysisSource = (model) => String(model || "").toLowerCase().startsWith("local:") ? "local" : String(model || "").trim() ? "paid" : "unknown";
+const shellQuote = (input) => /[\s&|<>^]/.test(String(input || "")) ? `"${String(input || "").replaceAll('"','\\"')}"` : String(input || "");
+
+function localAiOptions(filters, callIds = [], lowImpact = true, upgrade = false) {
+  const current = {};
+  if (filters?.vendor) current.vendor = filters.vendor;
+  if (filters?.leadType) current.lead_type = filters.leadType;
+  if (filters?.status) current.lead_status = filters.status;
+  if (filters?.agent) current.user_name = filters.agent;
+  const ids = [...new Set(callIds.map(Number).filter((id) => Number.isInteger(id) && id > 0))];
+  const params = new URLSearchParams();
+  if (filters?.from) params.set("from", filters.from);
+  if (filters?.to) params.set("to", filters.to);
+  if (upgrade) params.set("upgrade", "1");
+  if (lowImpact) params.set("low_impact", "1");
+  if (ids.length) params.set("call_ids", ids.join(",")); else Object.entries(current).forEach(([key,item]) => params.set(key,item));
+  const command = ["C:\\CallReviewAI\\run_local_ai_manual_v11.cmd"];
+  if (filters?.from) command.push("--from-date", filters.from);
+  if (filters?.to) command.push("--to-date", filters.to);
+  if (upgrade) command.push("--reanalyze-local");
+  if (lowImpact) command.push("--low-impact");
+  if (ids.length) command.push("--call-ids", ids.join(","));
+  else Object.entries(current).forEach(([key,item]) => command.push({ vendor:"--vendor",lead_type:"--lead-type",lead_status:"--lead-status",user_name:"--user-name" }[key], shellQuote(item)));
+  return { protocol: `ricochetai://run?${params.toString()}`, command: command.join(" ") };
+}
+
+function parseAiList(input) {
+  if (Array.isArray(input)) return input.filter(Boolean).map(String);
+  const text = String(input || "").trim();
+  if (!text) return [];
+  try { const parsed = JSON.parse(text); if (Array.isArray(parsed)) return parsed.filter(Boolean).map(String); } catch { /* Plain text fallback. */ }
+  return text.split(/\n|\s*;\s*/).map((item) => item.trim()).filter(Boolean);
+}
+
+function AnalysisMatch({ label, matched }) {
+  const known = matched === true || matched === false;
+  return <span className={`analysis-match ${matched === true ? "good" : matched === false ? "bad" : "unknown"}`}>{known ? matched ? "✓" : "!" : "—"} {label}: {known ? matched ? "Matches" : "Conflict" : "Not scored"}</span>;
+}
+
+function CallAiReviewModal({ rows, selectedCallId, setSelectedCallId, onLocal, onPaid, busy }) {
+  const [detail, setDetail] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const selectedIndex = rows.findIndex((row) => Number(row.id) === Number(selectedCallId));
+  const row = rows[selectedIndex] || rows.find((item) => Number(item.id) === Number(selectedCallId)) || {};
+  const move = (direction) => { if (!rows.length) return; const next = (Math.max(selectedIndex,0) + direction + rows.length) % rows.length; setSelectedCallId(Number(rows[next].id)); };
+  useEffect(() => {
+    let active = true; setLoading(true); setError(""); setDetail(null);
+    loadCallAiReview(selectedCallId).then((output) => { if (active) setDetail(output); }).catch((cause) => { if (active) setError(cause.message); }).finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [selectedCallId]);
+  useEffect(() => { const close = (event) => { if (event.key === "Escape") setSelectedCallId(null); }; window.addEventListener("keydown",close); return () => window.removeEventListener("keydown",close); }, [setSelectedCallId]);
+  const call = { ...row, ...(detail?.call || {}) };
+  const analysis = { ...row, ...(detail?.analysis || {}) };
+  const note = detail?.note || {};
+  const source = analysisSource(analysis.analysis_model || analysis.ai_analysis_model);
+  const completed = String(analysis.analysis_status || analysis.ai_analysis_status || "").toLowerCase() === "completed";
+  const statusMatches = analysis.status_matches ?? analysis.ai_status_matches;
+  const noteMatches = analysis.note_matches ?? analysis.ai_note_matches;
+  const facts = [["Call date",call.call_date_time],["Agent",call.agent_name || call.user_name],["Direction",call.direction],["Duration",longDuration(call.duration_seconds)],["Call status",call.call_status],["Current lead status",call.lead_status],["AI model",analysis.analysis_model || analysis.ai_analysis_model],["Reviewed",analysis.reviewed_at]];
+  const lists = [["Note differences",analysis.note_differences],["Missing questions",analysis.missing_questions],["Coaching",analysis.coaching]];
+  return <div className="review-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setSelectedCallId(null); }}><section className="review-modal ai-review-modal" role="dialog" aria-modal="true" aria-label={`AI call review for ${fullName(call)}`}>
+    <header className="review-modal-header"><div><span className="eyebrow">Complete call AI review</span><h2>{fullName(call)}</h2><div className="tag-row"><span className={`analysis-source ${source}`}>{source === "local" ? "Local AI" : source === "paid" ? "Paid OpenAI" : "AI source pending"}</span><span className="tag">{completed ? `Score ${number(analysis.agent_score ?? analysis.ai_agent_score)}/100` : String(analysis.analysis_status || analysis.ai_analysis_status || "Not reviewed").replaceAll("_"," ")}</span></div></div><button className="review-close" onClick={() => setSelectedCallId(null)} aria-label="Close AI review"><X size={22} /></button></header>
+    {loading && !detail ? <div className="review-modal-loading"><RefreshCw className="spin" /><span>Loading the transcript and complete AI analysis…</span></div> : <div className="review-modal-body ai-review-body">
+      {error && <div className="error-box"><TriangleAlert size={16} /><span>{error} The call-row summary is still shown below.</span></div>}
+      <section className="review-summary-grid">{facts.map(([label,item]) => <div className="review-fact" key={label}><span>{label}</span><strong>{item || "—"}</strong></div>)}</section>
+      <section className="review-section ai-score-section"><div className="ai-score-card"><div className="ai-score-ring" style={{ "--score": Math.max(0,Math.min(100,Number(analysis.agent_score ?? analysis.ai_agent_score ?? 0))) }}><strong>{number(analysis.agent_score ?? analysis.ai_agent_score)}</strong></div><div><span className="eyebrow">Agent score</span><h3>{completed ? "AI review completed" : "Analysis has not completed"}</h3><div className="analysis-match-row"><AnalysisMatch label="Status" matched={statusMatches} /><AnalysisMatch label="Note" matched={noteMatches} /></div></div></div>{call.call_uuid && <AudioPlayer callUuid={call.call_uuid} />}</section>
+      <section className="review-section"><span className="eyebrow">AI conclusion</span><h3>Summary and recommendation</h3><div className="ai-analysis-grid"><div className="ai-analysis-box wide"><span>Summary</span><p>{analysis.summary || analysis.ai_summary || "No AI summary has been saved."}</p></div><div className="ai-analysis-box"><span>Current status</span><strong>{analysis.current_status || call.lead_status || "—"}</strong></div><div className="ai-analysis-box"><span>Recommended status</span><strong>{analysis.recommended_status || "—"}</strong></div><div className="ai-analysis-box wide"><span>Status reason</span><p>{analysis.status_reason || "No status explanation was saved."}</p></div><div className="ai-analysis-box wide"><span>Next action</span><p>{analysis.next_action || "No next action was saved."}</p></div></div></section>
+      {lists.some(([,items]) => parseAiList(items).length) && <section className="review-section"><span className="eyebrow">Quality details</span><h3>Differences, missed questions, and coaching</h3><div className="ai-analysis-grid">{lists.map(([label,items]) => { const values = parseAiList(items); return values.length ? <div className="ai-analysis-box" key={label}><span>{label}</span><ul>{values.map((item,index) => <li key={`${label}-${index}`}>{item}</li>)}</ul></div> : null; })}</div></section>}
+      <section className="review-section"><span className="eyebrow">Transcript</span><h3>Recording dialogue</h3><div className="ai-transcript">{analysis.english_transcript || analysis.original_transcript || "No transcript has been synchronized yet."}</div></section>
+      <section className="review-section"><span className="eyebrow">Matched note</span><h3>{note.owner || "No exact note owner"}</h3><div className="ai-note-evidence">{note.text || "No exact matched note was found for this call."}</div>{analysis.corrected_note && <><span className="eyebrow corrected-label">AI corrected note</span><div className="ai-note-evidence corrected">{analysis.corrected_note}</div></>}</section>
+      {(analysis.analysis_error || analysis.transcription_error) && <div className="error-box"><TriangleAlert size={16} /><span>{analysis.analysis_error || analysis.transcription_error}</span></div>}
+    </div>}
+    <footer className="review-modal-footer"><div className="review-navigation"><button className="button secondary" onClick={() => move(-1)}><ChevronLeft size={16} />Previous</button><button className="button secondary" onClick={() => move(1)}>Next call<ChevronRight size={16} /></button></div><div className="review-decisions"><button className="button local-ai-button" disabled={busy || !callIsEligibleForAi(call)} onClick={() => onLocal({ ...call,ai_analysis_model:analysis.analysis_model,ai_analysis_status:analysis.analysis_status })}><Cpu size={15} />{completed && source === "local" ? "Reanalyze locally" : "Run Local AI"}</button><button className="button paid-ai-button" disabled={busy || !callIsEligibleForAi(call)} onClick={() => onPaid([call],completed)}><Sparkles size={15} />{completed ? "Reanalyze with paid AI" : "Run paid AI"}</button></div></footer>
+  </section></div>;
+}
+
+export function CallsView({ data, filters, page, setPage, setToast, onDataChanged }) {
   const rows = data?.rows || [];
+  const [selectedIds,setSelectedIds] = useState(() => new Set());
+  const [lowImpact,setLowImpact] = useState(true);
+  const [reanalyzeCompleted,setReanalyzeCompleted] = useState(false);
+  const [busy,setBusy] = useState("");
+  const [progress,setProgress] = useState("");
+  const [selectedCallId,setSelectedCallId] = useState(null);
+  useEffect(() => { setSelectedIds(new Set()); }, [page,filters]);
   const callColumns = {
     lead: { value: (row) => fullName(row) }, agent: { value: "user_name" }, date: { value: "call_date_time", type: "date" },
     direction: { value: "direction" }, duration: { value: "duration_seconds", type: "number" }, status: { value: (row) => row.lead_status || row.call_status },
     ai: { value: (row) => row.ai_analysis_status === "completed" ? row.ai_agent_score : -1, type: "number" }, recording: { value: (row) => row.call_uuid ? 1 : 0, type: "number" },
   };
   const sorted = useTableSort(rows, callColumns, "date", "desc");
-  const analyze = async (row) => {
-    try { await runAiAction("/ai/analyze-call", { call_event_id: row.id }); setToast("AI review was queued."); }
-    catch (error) { setToast(error.message, true); }
+  const visibleEligible = sorted.rows.filter(callIsEligibleForAi);
+  const visibleSelected = visibleEligible.filter((row) => selectedIds.has(Number(row.id)));
+  const allVisibleSelected = visibleEligible.length > 0 && visibleSelected.length === visibleEligible.length;
+  const toggleVisible = () => setSelectedIds((current) => { const next = new Set(current); visibleEligible.forEach((row) => allVisibleSelected ? next.delete(Number(row.id)) : next.add(Number(row.id))); return next; });
+  const toggleOne = (id) => setSelectedIds((current) => { const next = new Set(current); next.has(Number(id)) ? next.delete(Number(id)) : next.add(Number(id)); return next; });
+  const startLocal = (callRows = []) => {
+    const ids = callRows.map((row) => Number(row.id)).filter(Boolean);
+    const options = localAiOptions(filters,ids,lowImpact,callRows.some((row) => analysisSource(row.ai_analysis_model || row.analysis_model) === "local" && String(row.ai_analysis_status || row.analysis_status).toLowerCase() === "completed"));
+    const link = document.createElement("a"); link.href = options.protocol; link.style.display = "none"; document.body.appendChild(link); link.click(); window.setTimeout(() => link.remove(),2500);
+    setProgress(`Local AI requested for ${ids.length ? `${ids.length} selected call${ids.length === 1 ? "" : "s"}` : "all eligible calls in the applied range"}. It will stop when finished.`);
   };
-  return <article className="panel report-panel"><div className="panel-heading"><div><span className="eyebrow">Calls and AI</span><h3>Recent call recordings</h3><p>Reporting rows come directly from Supabase. Playback and AI commands use the private Worker bridge.</p></div></div>
-    {!rows.length ? <Empty message="No calls matched these filters." /> : <div className="table-wrap"><table><thead><tr><SortHeader id="lead" label="Lead" sort={sorted.sort} onSort={sorted.requestSort} /><SortHeader id="agent" label="Agent" sort={sorted.sort} onSort={sorted.requestSort} /><SortHeader id="date" label="Date" sort={sorted.sort} onSort={sorted.requestSort} /><SortHeader id="direction" label="Direction" sort={sorted.sort} onSort={sorted.requestSort} /><SortHeader id="duration" label="Duration" sort={sorted.sort} onSort={sorted.requestSort} /><SortHeader id="status" label="Status" sort={sorted.sort} onSort={sorted.requestSort} /><SortHeader id="ai" label="AI review" sort={sorted.sort} onSort={sorted.requestSort} /><SortHeader id="recording" label="Recording" sort={sorted.sort} onSort={sorted.requestSort} /></tr></thead><tbody>{sorted.rows.map((row) => <tr key={row.id}><td><strong>{fullName(row)}</strong><small>{row.phone || "No phone"}</small></td><td>{value(row, "user_name")}</td><td>{value(row, "call_date_time")}</td><td>{value(row, "direction")}</td><td>{duration(row.duration_seconds)}</td><td><span className="tag">{value(row, "lead_status", "call_status")}</span></td><td>{row.ai_analysis_status === "completed" ? <span className="reviewed">{number(row.ai_agent_score)} reviewed</span> : <button className="text-action" onClick={() => analyze(row)}><Bot size={14} />Analyze</button>}</td><td><AudioPlayer compact callUuid={row.call_uuid} /></td></tr>)}</tbody></table></div>}
+  const copyLocalCommand = async () => {
+    const selected = [...selectedIds]; const selectedRows = rows.filter((row) => selectedIds.has(Number(row.id))); const upgrade = selectedRows.some((row) => analysisSource(row.ai_analysis_model) === "local" && String(row.ai_analysis_status || "").toLowerCase() === "completed"); const { command } = localAiOptions(filters,selected,lowImpact,upgrade);
+    try { await navigator.clipboard.writeText(command); setToast("Local AI command copied."); } catch { window.prompt("Copy this Local AI command:",command); }
+  };
+  const queuePaid = async (callRows, force = reanalyzeCompleted, skipConfirmation = false) => {
+    const ids = [...new Set(callRows.map((row) => Number(row.id)).filter(Boolean))]; if (!ids.length) return { queued: 0 };
+    if (!skipConfirmation && !window.confirm(`Use paid OpenAI to analyze ${ids.length.toLocaleString()} call${ids.length === 1 ? "" : "s"}?${force ? "\n\nCompleted reviews will be replaced." : ""}`)) return { cancelled: true };
+    setBusy("paid"); let queued = 0; const skipped = [];
+    try {
+      for (let index = 0; index < ids.length; index += 100) {
+        const chunk = ids.slice(index,index + 100); setProgress(`Queueing paid AI calls ${index + 1}-${Math.min(index + chunk.length,ids.length)} of ${ids.length.toLocaleString()}…`);
+        const result = await runAiAction("/ai/queue-calls", { call_event_ids: chunk, force });
+        queued += Number(result.queued ?? result.callEventIds?.length ?? result.call_event_ids?.length ?? 0); skipped.push(...(result.skipped || []));
+      }
+      setProgress(`${queued.toLocaleString()} paid AI call${queued === 1 ? "" : "s"} queued in Cloudflare.${skipped.length ? ` ${skipped.length.toLocaleString()} skipped.` : ""}`);
+      setSelectedIds(new Set()); onDataChanged?.(); return { queued,skipped };
+    } catch (error) { setProgress(`Paid AI could not start: ${error.message}`); setToast(error.message,true); return { error }; }
+    finally { setBusy(""); }
+  };
+  const queueAllPaid = async () => {
+    setBusy("finding"); setProgress("Finding every matching eligible call in Supabase…");
+    try {
+      const all = await loadAllFilteredCalls(filters,(done,total) => setProgress(`Reading matching calls ${done.toLocaleString()} of ${total.toLocaleString()}…`));
+      const eligible = all.filter((row) => callIsEligibleForAi(row) && !callIsBusy(row) && (reanalyzeCompleted || String(row.ai_analysis_status || "").toLowerCase() !== "completed"));
+      if (!eligible.length) { setProgress("No eligible matching calls remain."); return; }
+      if (!window.confirm(`Use paid OpenAI to queue ${eligible.length.toLocaleString()} matching call${eligible.length === 1 ? "" : "s"}?${reanalyzeCompleted ? "\n\nCompleted reviews will be replaced." : ""}`)) { setProgress("Paid AI run cancelled."); return; }
+      await queuePaid(eligible,reanalyzeCompleted,true);
+    } catch (error) { setProgress(`Could not prepare the paid AI run: ${error.message}`); setToast(error.message,true); }
+    finally { setBusy(""); }
+  };
+  return <article className="panel report-panel"><div className="panel-heading"><div><span className="eyebrow">Calls and AI</span><h3>Recent call recordings</h3><p>Select specific calls for your Windows Local AI or the paid Cloudflare/OpenAI queue. Open any AI review to see its transcript, score, findings, note comparison, and recording.</p></div></div>
+    <section className="ai-control-panel"><div className="ai-selection"><label><input type="checkbox" checked={allVisibleSelected} onChange={toggleVisible} disabled={!visibleEligible.length} />Select visible</label><strong>{selectedIds.size.toLocaleString()} selected</strong></div><div className="ai-control-group local"><div><b>Local AI · manual</b><label><input type="checkbox" checked={lowImpact} onChange={(event) => setLowImpact(event.target.checked)} />Low-impact</label></div><button className="button local-ai-button" disabled={!selectedIds.size || Boolean(busy)} onClick={() => startLocal(rows.filter((row) => selectedIds.has(Number(row.id))))}><Cpu size={15} />Analyze checked, then stop</button><button className="button secondary local-outline" disabled={Boolean(busy)} onClick={() => startLocal()}><Cpu size={15} />Analyze matching range, then stop</button><button className="button ghost copy-local" onClick={copyLocalCommand}><Copy size={14} />Copy command</button></div><div className="ai-control-group paid"><div><b>Paid OpenAI</b><label><input type="checkbox" checked={reanalyzeCompleted} onChange={(event) => setReanalyzeCompleted(event.target.checked)} />Reanalyze completed</label></div><button className="button paid-ai-button" disabled={!selectedIds.size || Boolean(busy)} onClick={() => queuePaid(rows.filter((row) => selectedIds.has(Number(row.id))))}><Sparkles size={15} />Analyze selected with paid AI</button><button className="button secondary paid-outline" disabled={Boolean(busy)} onClick={queueAllPaid}><Sparkles size={15} />Analyze all matching with paid AI</button></div><p>Local opens your installed one-time Windows launcher and exits after the requested calls. Paid runs in Cloudflare and may continue after this page is closed.</p>{progress && <div className="ai-progress" role="status">{busy && <RefreshCw className="spin" size={14} />}{progress}</div>}</section>
+    {!rows.length ? <Empty message="No calls matched these filters." /> : <div className="table-wrap"><table className="calls-ai-table"><thead><tr><th className="selection-column">Select</th><SortHeader id="lead" label="Lead" sort={sorted.sort} onSort={sorted.requestSort} /><SortHeader id="agent" label="Agent" sort={sorted.sort} onSort={sorted.requestSort} /><SortHeader id="date" label="Date" sort={sorted.sort} onSort={sorted.requestSort} /><SortHeader id="direction" label="Direction" sort={sorted.sort} onSort={sorted.requestSort} /><SortHeader id="duration" label="Duration" sort={sorted.sort} onSort={sorted.requestSort} /><SortHeader id="status" label="Status" sort={sorted.sort} onSort={sorted.requestSort} /><SortHeader id="ai" label="AI review" sort={sorted.sort} onSort={sorted.requestSort} /><SortHeader id="recording" label="Recording" sort={sorted.sort} onSort={sorted.requestSort} /></tr></thead><tbody>{sorted.rows.map((row) => { const completed = String(row.ai_analysis_status || "").toLowerCase() === "completed"; const source = analysisSource(row.ai_analysis_model); const eligible = callIsEligibleForAi(row); return <tr key={row.id}><td className="selection-column"><input type="checkbox" aria-label={`Select call ${row.id}`} checked={selectedIds.has(Number(row.id))} disabled={!eligible} title={eligible ? "Select this call" : "A recording and at least 30 seconds are required"} onChange={() => toggleOne(row.id)} /></td><td><strong>{fullName(row)}</strong><small>{row.phone || "No phone"}</small></td><td>{value(row,"user_name")}</td><td>{value(row,"call_date_time")}</td><td>{value(row,"direction")}</td><td>{duration(row.duration_seconds)}</td><td><span className="tag">{value(row,"lead_status","call_status")}</span></td><td><div className="ai-review-cell">{completed ? <><span className={`analysis-source ${source}`}>{source === "local" ? "Local" : source === "paid" ? "Paid" : "Unknown"}</span><strong>{number(row.ai_agent_score)}/100</strong></> : <span className={`analysis-state ${callIsBusy(row) ? "working" : ""}`}>{String(row.ai_analysis_status || "Not reviewed").replaceAll("_"," ")}</span>}<button className="text-action" onClick={() => setSelectedCallId(Number(row.id))}><Eye size={14} />{completed ? "View analysis" : "View details"}</button></div></td><td><AudioPlayer compact callUuid={row.call_uuid} /></td></tr>; })}</tbody></table></div>}
     <Pager data={data} page={page} setPage={setPage} />
+    {selectedCallId && <CallAiReviewModal rows={sorted.rows} selectedCallId={selectedCallId} setSelectedCallId={setSelectedCallId} onLocal={(row) => startLocal([row])} onPaid={queuePaid} busy={Boolean(busy)} />}
   </article>;
 }
 
@@ -511,7 +636,7 @@ export function TeacherView({ data, page, setPage, setToast }) {
 
 export function ViewRouter({ page, data, filters, pagination, setPagination, setToast, onDataChanged }) {
   if (page === "team") return <TeamView data={data} setToast={setToast} onDataChanged={onDataChanged} />;
-  if (page === "calls") return <CallsView data={data} page={pagination.page} setPage={(pageNumber) => setPagination({ ...pagination, page: pageNumber })} setToast={setToast} />;
+  if (page === "calls") return <CallsView data={data} filters={filters} page={pagination.page} setPage={(pageNumber) => setPagination({ ...pagination, page: pageNumber })} setToast={setToast} onDataChanged={onDataChanged} />;
   if (page === "notes") return <NotesView data={data} page={pagination.page} setPage={(pageNumber) => setPagination({ ...pagination, page: pageNumber })} />;
   if (page === "leads") return <LeadsView data={data} filters={filters} page={pagination.page} setPage={(pageNumber) => setPagination({ ...pagination, page: pageNumber })} setToast={setToast} />;
   if (page === "csv") return <CsvView setToast={setToast} />;
