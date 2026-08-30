@@ -117,6 +117,31 @@ export async function loadCsvCallDetails(leadIds) {
   return Array.isArray(data) ? data : [];
 }
 
+export async function loadCallAiReview(callEventId) {
+  const { data, error } = await requiredClient().rpc("dashboard_call_ai_review", { p_call_event_id: Number(callEventId) });
+  if (error) throw new Error(error.message || "Could not load the call AI review.");
+  return data || {};
+}
+
+export async function loadAllFilteredCalls(filters, onProgress) {
+  const output = [];
+  let page = 1;
+  let total = Number.POSITIVE_INFINITY;
+  while (output.length < total) {
+    const params = reportParameters(filters, { page, pageSize: 200 });
+    const { data, error } = await requiredClient().rpc("dashboard_calls", params);
+    if (error) throw new Error(error.message || "Could not load all matching calls.");
+    const rows = Array.isArray(data?.rows) ? data.rows : [];
+    total = Number(data?.total || 0);
+    output.push(...rows);
+    onProgress?.(Math.min(output.length, total), total);
+    if (!rows.length || output.length >= total) break;
+    page += 1;
+    if (page > 500) throw new Error("The call selection exceeded the safe page limit. Narrow the filters and try again.");
+  }
+  return output;
+}
+
 export async function setLiveBonusDecision({ leadId, decision, agentId = "", agentName = "", agentEmail = "", reason }) {
   const { data, error } = await requiredClient().rpc("dashboard_set_live_bonus_decision", {
     p_lead_id: Number(leadId),
