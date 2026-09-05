@@ -1,4 +1,5 @@
 export const demoOverview = {
+  first_response: { available: true, received_leads: 10093, created_time_available: 9981, first_called_leads: 9120, never_called_leads: 973, response_sample: 9070, average_seconds: 742, median_seconds: 318, within_5_minutes: 4431, within_5_minutes_rate: 44.4 },
   totals: {
     leads_received: 10093,
     activity_cohort: 12086,
@@ -74,8 +75,8 @@ export const demoLeads = {
   page: 1,
   page_size: 50,
   rows: [
-    { id: 22514, first_name: "Miguel", last_name: "Cesar", phone: "8138022817", email: "miguel@example.com", lead_status: "2.0 CONTACTED - Follow Up", lead_type: "Buyer", vendor: "HomeValue.com", user_name: "Melissa Pujol", city: "Plant City", property_state: "FL", lead_date: "2026-08-25" },
-    { id: 20465, first_name: "Rebekah", last_name: "Handlee", phone: "9046990674", email: "rebekah@example.com", lead_status: "1.0 CALLED - No Contact", lead_type: "Unknown", vendor: "Realty.com", user_name: "Diego Nieto", city: "Jacksonville", property_state: "FL", lead_date: "2026-08-25" },
+    { id: 22514, first_name: "Miguel", last_name: "Cesar", phone: "8138022817", email: "miguel@example.com", lead_status: "2.0 CONTACTED - Follow Up", lead_type: "Buyer", vendor: "HomeValue.com", user_name: "Melissa Pujol", city: "Plant City", property_state: "FL", lead_date: "2026-08-25", created_date: "2026-08-25", created_at: "2026-08-25 15:42:00", first_call_at: "2026-08-25 16:18:00", first_call_owner: "Melissa Pujol", first_call_direction: "Outbound", seconds_to_first_call: 2160 },
+    { id: 20465, first_name: "Rebekah", last_name: "Handlee", phone: "9046990674", email: "rebekah@example.com", lead_status: "1.0 CALLED - No Contact", lead_type: "Unknown", vendor: "Realty.com", user_name: "Diego Nieto", city: "Jacksonville", property_state: "FL", lead_date: "2026-08-25", created_date: "2026-08-25", created_at: "2026-08-25 17:03:00", first_call_at: null, seconds_to_first_call: null },
   ],
 };
 
