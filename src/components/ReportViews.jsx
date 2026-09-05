@@ -15,6 +15,14 @@ const longDuration = (seconds) => {
   const hours = Math.floor(total / 3600); const minutes = Math.floor((total % 3600) / 60); const secs = total % 60;
   return hours ? `${hours}h ${minutes}m ${secs}s` : duration(total);
 };
+const responseDuration = (seconds) => {
+  if (seconds === undefined || seconds === null || seconds === "") return "Time unavailable";
+  const total = Math.max(0, Math.floor(Number(seconds)));
+  const days = Math.floor(total / 86400); const hours = Math.floor((total % 86400) / 3600); const minutes = Math.floor((total % 3600) / 60);
+  if (days) return `${days}d ${hours}h ${minutes}m`;
+  if (hours) return `${hours}h ${minutes}m`;
+  return `${minutes}m`;
+};
 const value = (item, ...keys) => keys.map((key) => item?.[key]).find((candidate) => candidate !== undefined && candidate !== null && candidate !== "") ?? "—";
 const fullName = (row) => [row.first_name, row.last_name].filter(Boolean).join(" ") || "Unknown lead";
 const cleanNoteText = (text) => String(text || "").replace(/\r/g, "").trim();
@@ -133,6 +141,7 @@ function LeadReviewPopup({ rows, selectedLeadId, setSelectedLeadId }) {
 
 export function OverviewView({ data }) {
   const totals = data?.totals || {};
+  const firstResponse = data?.first_response || {};
   const cards = [
     ["Leads received", totals.leads_received, "Created inside the selected range", "blue"],
     ["Activity cohort", totals.activity_cohort, "Updated or active in range", "blue"],
@@ -150,6 +159,10 @@ export function OverviewView({ data }) {
     ["AI reviewed", totals.ai_reviewed, "Reviewed calls in selected range", "gold"],
     ["Average AI score", totals.average_ai_score ? number(totals.average_ai_score, 1) : "—", "Reviewed calls only", "gold"],
     ["Needs attention", totals.needs_attention, "Status or note mismatch", "gold"],
+    ["Average first call", firstResponse.available && firstResponse.response_sample ? responseDuration(firstResponse.average_seconds) : "—", `${number(firstResponse.response_sample)} received leads with timing`, "blue"],
+    ["Median first call", firstResponse.available && firstResponse.response_sample ? responseDuration(firstResponse.median_seconds) : "—", "Created time to earliest logged call", "blue"],
+    ["Called within 5 min", firstResponse.available ? `${number(firstResponse.within_5_minutes_rate,1)}%` : "—", `${number(firstResponse.within_5_minutes)} received leads`, "green"],
+    ["Never called", firstResponse.available ? firstResponse.never_called_leads : "—", "Received leads with no later call", "gold"],
   ];
   const statuses = data?.status_breakdown || [];
   const max = Math.max(1, ...statuses.map((row) => Number(row.count || 0)));
@@ -490,6 +503,12 @@ const leadExportFields = [
   { key: "address_2", label: "Address Line 2", value: (row) => row.address_2 || "" },
   { key: "agent_id", label: "Agent ID", value: (row) => row.user_id || "" },
   { key: "created_date", label: "Created Date", value: (row) => row.created_date || "" },
+  { key: "created_time", label: "Created Date and Time", value: (row) => row.created_at || row.created_date || "" },
+  { key: "first_call_time", label: "First Call Date and Time", value: (row) => row.first_call_at || "" },
+  { key: "first_call_owner", label: "First Call Owner", value: (row) => row.first_call_owner || "" },
+  { key: "first_call_direction", label: "First Call Direction", value: (row) => row.first_call_direction || "" },
+  { key: "time_to_first_call", label: "Created to First Call", value: (row) => row.first_call_at ? responseDuration(row.seconds_to_first_call) : "Never called" },
+  { key: "seconds_to_first_call", label: "Created to First Call (Seconds)", value: (row) => row.seconds_to_first_call ?? "" },
   { key: "first_live_date", label: "First Live Date", value: (row) => row.first_live_date || "" },
   { key: "live_email", label: "Live Email Sent", value: (row) => row.live_email_sent ? "Yes" : "No" },
   { key: "fub_id", label: "Follow Up Boss ID", value: (row) => row.fub_id || "" },
@@ -539,7 +558,7 @@ export function LeadsView({ data, filters, page, setPage, setToast }) {
   const leadColumns = {
     lead: { value: (row) => fullName(row) }, status: { value: "lead_status" }, type: { value: "lead_type" }, vendor: { value: "vendor" }, agent: { value: "user_name" },
     address: { value: (row) => [row.address,row.address_2,row.city,row.property_state,row.property_zip].filter(Boolean).join(" ") }, county: { value: "county" }, metro: { value: "metro" },
-    activity: { value: "lead_date", type: "date" }, created: { value: "created_date", type: "date" },
+    activity: { value: "lead_date", type: "date" }, created: { value: (row) => row.created_at || row.created_date, type: "date" },
   };
   const sorted = useTableSort(rows, leadColumns, "activity", "desc");
   const [selectedLeadId, setSelectedLeadId] = useState(null);
@@ -558,7 +577,7 @@ export function LeadsView({ data, filters, page, setPage, setToast }) {
     finally { setExporting(false); setExportProgress(""); }
   };
   const openExport = () => { setSelectedExportFields(defaultLeadExportFields); setShowExportDialog(true); };
-  return <><article className="panel report-panel"><div className="panel-heading"><div><span className="eyebrow">Lead directory</span><h3>Leads in the selected cohort</h3><p>Click any lead to view its complete notes, call owners, recordings, and timeline. County and metro use ZIP first, then a unique city/state fallback.</p></div><button className="button secondary" disabled={exporting || !Number(data?.total || 0)} onClick={openExport}><Download size={15} />Export all filtered</button></div>{!rows.length ? <Empty message="No leads matched these filters." /> : <div className="table-wrap"><table><thead><tr><SortHeader id="lead" label="Lead" sort={sorted.sort} onSort={sorted.requestSort} /><SortHeader id="status" label="Status" sort={sorted.sort} onSort={sorted.requestSort} /><SortHeader id="type" label="Type" sort={sorted.sort} onSort={sorted.requestSort} /><SortHeader id="vendor" label="Vendor" sort={sorted.sort} onSort={sorted.requestSort} /><SortHeader id="agent" label="Agent" sort={sorted.sort} onSort={sorted.requestSort} /><SortHeader id="address" label="Address" sort={sorted.sort} onSort={sorted.requestSort} /><SortHeader id="county" label="County" sort={sorted.sort} onSort={sorted.requestSort} /><SortHeader id="metro" label="Metro area" sort={sorted.sort} onSort={sorted.requestSort} /><SortHeader id="activity" label="Activity date" sort={sorted.sort} onSort={sorted.requestSort} /><SortHeader id="created" label="Created date" sort={sorted.sort} onSort={sorted.requestSort} /></tr></thead><tbody>{sorted.rows.map((row) => <tr key={row.id}><td><button className="lead-review-link" onClick={() => setSelectedLeadId(row.id)}><strong>{fullName(row)}</strong><small>{row.phone || ""}{row.email ? ` · ${row.email}` : ""} · Open full record</small></button></td><td><span className="tag">{value(row, "lead_status")}</span></td><td>{value(row, "lead_type")}</td><td>{value(row, "vendor")}</td><td>{value(row, "user_name")}</td><td>{[row.address, row.address_2, row.city, row.property_state, row.property_zip].filter(Boolean).join(", ") || "—"}</td><td>{row.county ? <><span>{row.county}</span><small className="geo-source">{row.geo_match_method === "city_state_unique_county" ? "City/state fallback" : "ZIP match"}</small></> : "Unmapped"}</td><td>{row.metro || (row.geo_match_method === "city_state_unique_county" ? "Not uniquely mapped" : "Unmapped")}</td><td>{value(row, "lead_date")}</td><td>{value(row, "created_date")}</td></tr>)}</tbody></table></div>}<Pager data={data} page={page} setPage={setPage} /></article>{selectedLeadId && <LeadReviewPopup rows={sorted.rows} selectedLeadId={selectedLeadId} setSelectedLeadId={setSelectedLeadId} />}{showExportDialog && <LeadExportDialog selectedFields={selectedExportFields} setSelectedFields={setSelectedExportFields} exporting={exporting} exportProgress={exportProgress} onClose={() => setShowExportDialog(false)} onExport={exportAll} />}</>;
+  return <><article className="panel report-panel"><div className="panel-heading"><div><span className="eyebrow">Lead directory</span><h3>Leads in the selected cohort</h3><p>Click any lead to view its complete notes, call owners, recordings, and timeline. First-response timing is available in the export field chooser.</p></div><button className="button secondary" disabled={exporting || !Number(data?.total || 0)} onClick={openExport}><Download size={15} />Export all filtered</button></div>{!rows.length ? <Empty message="No leads matched these filters." /> : <div className="table-wrap"><table><thead><tr><SortHeader id="lead" label="Lead" sort={sorted.sort} onSort={sorted.requestSort} /><SortHeader id="status" label="Status" sort={sorted.sort} onSort={sorted.requestSort} /><SortHeader id="type" label="Type" sort={sorted.sort} onSort={sorted.requestSort} /><SortHeader id="vendor" label="Vendor" sort={sorted.sort} onSort={sorted.requestSort} /><SortHeader id="agent" label="Agent" sort={sorted.sort} onSort={sorted.requestSort} /><SortHeader id="address" label="Address" sort={sorted.sort} onSort={sorted.requestSort} /><SortHeader id="county" label="County" sort={sorted.sort} onSort={sorted.requestSort} /><SortHeader id="metro" label="Metro area" sort={sorted.sort} onSort={sorted.requestSort} /><SortHeader id="activity" label="Activity date" sort={sorted.sort} onSort={sorted.requestSort} /><SortHeader id="created" label="Created date" sort={sorted.sort} onSort={sorted.requestSort} /></tr></thead><tbody>{sorted.rows.map((row) => <tr key={row.id}><td><button className="lead-review-link" onClick={() => setSelectedLeadId(row.id)}><strong>{fullName(row)}</strong><small>{row.phone || ""}{row.email ? ` · ${row.email}` : ""} · Open full record</small></button></td><td><span className="tag">{value(row, "lead_status")}</span></td><td>{value(row, "lead_type")}</td><td>{value(row, "vendor")}</td><td>{value(row, "user_name")}</td><td>{[row.address, row.address_2, row.city, row.property_state, row.property_zip].filter(Boolean).join(", ") || "—"}</td><td>{row.county ? <><span>{row.county}</span><small className="geo-source">{row.geo_match_method === "city_state_unique_county" ? "City/state fallback" : "ZIP match"}</small></> : "Unmapped"}</td><td>{row.metro || (row.geo_match_method === "city_state_unique_county" ? "Not uniquely mapped" : "Unmapped")}</td><td>{value(row, "lead_date")}</td><td>{value(row, "created_date")}</td></tr>)}</tbody></table></div>}<Pager data={data} page={page} setPage={setPage} /></article>{selectedLeadId && <LeadReviewPopup rows={sorted.rows} selectedLeadId={selectedLeadId} setSelectedLeadId={setSelectedLeadId} />}{showExportDialog && <LeadExportDialog selectedFields={selectedExportFields} setSelectedFields={setSelectedExportFields} exporting={exporting} exportProgress={exportProgress} onClose={() => setShowExportDialog(false)} onExport={exportAll} />}</>;
 }
 
 export function CsvView({ setToast }) {
