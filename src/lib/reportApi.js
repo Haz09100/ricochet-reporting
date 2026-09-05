@@ -63,7 +63,11 @@ export async function loadReportPage(page, filters, pagination = {}, { bypassCac
   }
   const { data, error } = response;
   if (error) throw new Error(error.message || `Could not load ${page}.`);
-  const result = data || {};
+  let result = data || {};
+  if (page === "overview") {
+    const response = await requiredClient().rpc("dashboard_first_response_metrics", reportParameters(filters));
+    result = { ...result, first_response: response.error ? { available: false } : { ...(response.data || {}), available: true } };
+  }
   reportCache.set(cacheKey, { data: result, savedAt: Date.now() });
   return result;
 }
