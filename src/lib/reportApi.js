@@ -65,8 +65,26 @@ export async function loadReportPage(page, filters, pagination = {}, { bypassCac
   if (error) throw new Error(error.message || `Could not load ${page}.`);
   let result = data || {};
   if (page === "overview") {
-    const response = await requiredClient().rpc("dashboard_first_response_metrics", reportParameters(filters));
-    result = { ...result, first_response: response.error ? { available: false } : { ...(response.data || {}), available: true } };
+    const [firstResponse, teamResponse] = await Promise.all([
+      requiredClient().rpc("dashboard_first_response_metrics", reportParameters(filters)),
+      requiredClient().rpc("dashboard_team", reportParameters(filters)),
+    ]);
+    const auditedLiveTotal = teamResponse.error
+      ? null
+      : Number(teamResponse.data?.live_bonus_totals?.sent_live_leads);
+    result = {
+      ...result,
+      totals: Number.isFinite(auditedLiveTotal)
+        ? {
+            ...(result.totals || {}),
+            live_leads_sent: auditedLiveTotal,
+            live_emails_sent: auditedLiveTotal,
+          }
+        : result.totals,
+      first_response: firstResponse.error
+        ? { available: false }
+        : { ...(firstResponse.data || {}), available: true },
+    };
   }
   reportCache.set(cacheKey, { data: result, savedAt: Date.now() });
   return result;
