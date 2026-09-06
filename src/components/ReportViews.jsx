@@ -459,11 +459,41 @@ export function CallsView({ data, filters, page, setPage, setToast, onDataChange
   </article>;
 }
 
-export function NotesView({ data, page, setPage }) {
+export function NotesView({ data, filters, page, setPage, setToast, onDataChanged }) {
   const rows = data?.rows || [];
+  const [selectedCallId,setSelectedCallId] = useState(null);
+  const [busy,setBusy] = useState(false);
+  const calls = useMemo(() => rows.flatMap((lead) => (lead.recordings || []).map((call) => ({
+    ...call,
+    lead_id: lead.id,
+    first_name: lead.first_name,
+    last_name: lead.last_name,
+    phone: lead.phone,
+    lead_status: lead.lead_status,
+    lead_type: lead.lead_type,
+  }))), [rows]);
+  const startLocal = (call) => {
+    const completedLocally = analysisSource(call.ai_analysis_model) === "local" && String(call.ai_analysis_status || "").toLowerCase() === "completed";
+    const options = localAiOptions(filters,[call.id],true,completedLocally);
+    const link = document.createElement("a"); link.href = options.protocol; link.style.display = "none"; document.body.appendChild(link); link.click(); window.setTimeout(() => link.remove(),2500);
+    setToast?.(`Local AI requested for ${fullName(call)}. It will stop when this call is finished.`);
+  };
+  const queuePaid = async (callRows, force = false) => {
+    const ids = [...new Set(callRows.map((call) => Number(call.id)).filter(Boolean))];
+    if (!ids.length || !window.confirm(`Use paid OpenAI to analyze this call?${force ? "\n\nThe completed review will be replaced." : ""}`)) return;
+    setBusy(true);
+    try {
+      const result = await runAiAction("/ai/queue-calls", { call_event_ids: ids, force });
+      const queued = Number(result.queued ?? result.callEventIds?.length ?? result.call_event_ids?.length ?? 0);
+      setToast?.(queued ? "The call was queued for paid AI analysis." : "The call was not queued. It may already be completed or processing.");
+      onDataChanged?.();
+    } catch (error) { setToast?.(error.message,true); }
+    finally { setBusy(false); }
+  };
   return <><div className="section-heading"><div><span className="eyebrow">Notes</span><h2>Complete notes on file with recording timeline</h2><p>Each card now uses the lead’s full synchronized note history, not only notes detected after the new report was installed.</p></div></div>
-    {!rows.length ? <Empty message="No notes matched these filters." /> : <div className="notes-grid">{rows.map((row) => <NoteCard row={row} key={row.id} />)}</div>}
+    {!rows.length ? <Empty message="No notes matched these filters." /> : <div className="notes-grid">{rows.map((row) => <NoteCard row={row} onOpenAi={setSelectedCallId} key={row.id} />)}</div>}
     <Pager data={data} page={page} setPage={setPage} />
+    {selectedCallId && <CallAiReviewModal rows={calls} selectedCallId={selectedCallId} setSelectedCallId={setSelectedCallId} onLocal={startLocal} onPaid={queuePaid} busy={busy} />}
   </>;
 }
 
@@ -472,13 +502,13 @@ function NoteEntry({ note, latest, live }) {
   const body = cleanNoteText(note.note_text) || "No note text";
   const isLong = body.length > 240 || body.split("\n").length > 5;
   const owner = value(note, "note_user_name", "note_user_email");
-  return <section className={`note-entry${latest ? " latest" : ""}${live ? " live" : ""}`}><div className="note-entry-heading"><div><strong>{latest ? "Latest note" : `Note ${number(note.note_sequence)}`}</strong>{live && <span className="live-note-label">Live-status note</span>}</div><time>{formatNoteTime(note.note_time)}</time></div><div className="note-owner"><span>{owner}</span>{note.note_user_id && <small>ID {note.note_user_id}</small>}{note.ricochet_note_id && <small>Note {note.ricochet_note_id}</small>}</div><p className={expanded ? "note-body expanded" : "note-body"}>{body}</p><div className="note-entry-actions">{isLong && <button className="text-action" onClick={() => setExpanded(!expanded)}>{expanded ? "Show less" : "Read more"}</button>}{note.call_uuid ? <AudioPlayer compact callUuid={note.call_uuid} /> : <span className="unmatched-recording">No exact recording match</span>}</div></section>;
+  return <section className={`note-entry${latest ? " latest" : ""}${live ? " live" : ""}`}><div className="note-entry-heading"><div><strong>{latest ? "Latest note" : `Note ${number(note.note_sequence)}`}</strong>{live && <span className="live-note-label">Live-status note</span>}</div><time>{formatNoteTime(note.note_time)}</time></div><div className="note-owner"><span>{owner}</span>{note.note_user_id && <small>ID {note.note_user_id}</small>}{note.ricochet_note_id && <small>Note {note.ricochet_note_id}</small>}</div><p className={expanded ? "note-body expanded" : "note-body"}>{body}</p><div className="note-entry-actions">{isLong && <button className="text-action" onClick={() => setExpanded(!expanded)}>{expanded ? "Show less" : "Read more"}</button>}{note.call_uuid ? <div className="note-linked-recording">{note.link_method === "lead_timeline" && <small>Linked by lead timeline</small>}<AudioPlayer compact callUuid={note.call_uuid} /></div> : <span className="unmatched-recording">No related recording found near this note</span>}</div></section>;
 }
 
-function NoteCard({ row }) {
+function NoteCard({ row, onOpenAi }) {
   const notes = mergedNotes(row); const latest = notes[0]; const older = notes.slice(1);
   const live = /live|appointment/i.test(String(row.lead_status || ""));
-  return <article className={`note-card compact-note-card${live ? " live-lead-note" : ""}`}><div className="note-top"><div><h3>{fullName(row)}</h3><div className="tag-row"><span className={`tag${live ? " live-tag" : ""}`}>{value(row, "lead_status")}</span><span className="tag quiet">{displayedLeadType(row, notes)}</span></div></div><span className="note-count">{number(notes.length)} notes</span></div>{latest ? <NoteEntry note={latest} latest live={live} /> : <span className="muted">No readable note was synchronized.</span>}{older.length > 0 && <details className="older-notes"><summary>View {number(older.length)} older notes</summary><div className="older-note-list">{older.map((note, index) => <NoteEntry note={note} key={`${noteKey(note)}-${index}`} />)}</div></details>}<details className="timeline"><summary><Headphones size={14} />All related recordings · {row.recordings?.length || 0}</summary>{(row.recordings || []).length ? row.recordings.map((call) => <div className="timeline-row" key={call.id}><div><strong>{call.exact_match ? "Latest exact note match" : value(call, "call_date_time")}</strong><span>{value(call, "user_name")} · {duration(call.duration_seconds)} · {value(call, "direction")}</span></div><AudioPlayer compact callUuid={call.call_uuid} /></div>) : <span className="muted">No playable recordings are synchronized for this lead.</span>}</details></article>;
+  return <article className={`note-card compact-note-card${live ? " live-lead-note" : ""}`}><div className="note-top"><div><h3>{fullName(row)}</h3><div className="tag-row"><span className={`tag${live ? " live-tag" : ""}`}>{value(row, "lead_status")}</span><span className="tag quiet">{displayedLeadType(row, notes)}</span></div></div><span className="note-count">{number(notes.length)} notes</span></div>{latest ? <NoteEntry note={latest} latest live={live} /> : <span className="muted">No readable note was synchronized.</span>}{older.length > 0 && <details className="older-notes"><summary>View {number(older.length)} older notes</summary><div className="older-note-list">{older.map((note, index) => <NoteEntry note={note} key={`${noteKey(note)}-${index}`} />)}</div></details>}<details className="timeline"><summary><Headphones size={14} />All related recordings · {row.recordings?.length || 0}</summary>{(row.recordings || []).length ? row.recordings.map((call) => { const completed = String(call.ai_analysis_status || "").toLowerCase() === "completed"; return <div className="timeline-row" key={call.id}><div><strong>{call.exact_match ? "Latest exact note match" : value(call, "call_date_time")}</strong><span>{value(call, "user_name")} · {duration(call.duration_seconds)} · {value(call, "direction")}</span></div><div className="timeline-actions"><button className="button note-ai-button" onClick={() => onOpenAi(Number(call.id))}>{completed ? <Eye size={13} /> : <Sparkles size={13} />}{completed ? "View analysis" : callIsBusy(call) ? "AI processing" : "Analyze"}</button><AudioPlayer compact callUuid={call.call_uuid} /></div></div>; }) : <span className="muted">No playable recordings are synchronized for this lead.</span>}</details></article>;
 }
 
 const leadExportFields = [
@@ -656,7 +686,7 @@ export function TeacherView({ data, page, setPage, setToast }) {
 export function ViewRouter({ page, data, filters, pagination, setPagination, setToast, onDataChanged }) {
   if (page === "team") return <TeamView data={data} setToast={setToast} onDataChanged={onDataChanged} />;
   if (page === "calls") return <CallsView data={data} filters={filters} page={pagination.page} setPage={(pageNumber) => setPagination({ ...pagination, page: pageNumber })} setToast={setToast} onDataChanged={onDataChanged} />;
-  if (page === "notes") return <NotesView data={data} page={pagination.page} setPage={(pageNumber) => setPagination({ ...pagination, page: pageNumber })} />;
+  if (page === "notes") return <NotesView data={data} filters={filters} page={pagination.page} setPage={(pageNumber) => setPagination({ ...pagination, page: pageNumber })} setToast={setToast} onDataChanged={onDataChanged} />;
   if (page === "leads") return <LeadsView data={data} filters={filters} page={pagination.page} setPage={(pageNumber) => setPagination({ ...pagination, page: pageNumber })} setToast={setToast} />;
   if (page === "csv") return <CsvView setToast={setToast} />;
   if (page === "teacher") return <TeacherView data={data} page={pagination.page} setPage={(pageNumber) => setPagination({ ...pagination, page: pageNumber })} setToast={setToast} />;
