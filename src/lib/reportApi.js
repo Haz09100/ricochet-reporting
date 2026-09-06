@@ -28,6 +28,7 @@ export function reportParameters(filters, extra = {}) {
       agent: filters.agent,
       vendor: filters.vendor,
       lead_type: filters.leadType,
+      creation_origin: filters.creationOrigin,
       state: filters.state,
       city: filters.city,
       ...(filters.countyFilterActive ? { counties: filters.counties || [] } : {}),
@@ -64,6 +65,12 @@ export async function loadReportPage(page, filters, pagination = {}, { bypassCac
   const { data, error } = response;
   if (error) throw new Error(error.message || `Could not load ${page}.`);
   let result = data || {};
+  if (page === "leads") result = await decorateCompanionRows(result);
+  if (page === "team") {
+    const companion = await requiredClient().rpc("dashboard_companion_bonus", reportParameters(filters));
+    if (companion.error) throw new Error(companion.error.message || "Could not load companion lead bonuses.");
+    result = { ...result, companion_bonus: companion.data || {} };
+  }
   if (page === "overview") {
     const [firstResponse, teamResponse] = await Promise.all([
       requiredClient().rpc("dashboard_first_response_metrics", reportParameters(filters)),
@@ -113,7 +120,8 @@ export async function loadAllFilteredLeads(filters, selectedFields = [], onProgr
     if (error) throw new Error(error.message || "Could not prepare the full lead export.");
     const rows = Array.isArray(data?.rows) ? data.rows : [];
     total = Number(data?.total || 0);
-    output.push(...rows);
+    const decorated = await decorateCompanionRows({ rows });
+    output.push(...decorated.rows);
     onProgress?.(Math.min(output.length, total), total);
     if (!rows.length || output.length >= total) break;
     page += 1;
@@ -130,7 +138,18 @@ export async function matchCsvRows(rows) {
   }
   const { data, error } = response;
   if (error) throw new Error(error.message || "CSV matching failed.");
-  return Array.isArray(data) ? data : data?.rows || [];
+  const matched = Array.isArray(data) ? data : data?.rows || [];
+  return (await decorateCompanionRows({ rows: matched }, "lead_id")).rows;
+}
+
+async function decorateCompanionRows(result, idField = "id") {
+  const rows = Array.isArray(result?.rows) ? result.rows : [];
+  const ids = [...new Set(rows.map((row) => Number(row?.[idField] || 0)).filter(Boolean))];
+  if (!ids.length) return { ...(result || {}), rows };
+  const { data, error } = await requiredClient().rpc("dashboard_companion_origins", { p_lead_ids: ids });
+  if (error) throw new Error(error.message || "Could not identify companion leads.");
+  const byId = new Map((Array.isArray(data) ? data : []).map((item) => [Number(item.id), item]));
+  return { ...(result || {}), rows: rows.map((row) => ({ ...row, ...(byId.get(Number(row?.[idField])) || {}) })) };
 }
 
 export async function loadCsvCallDetails(leadIds) {
@@ -174,6 +193,15 @@ export async function setLiveBonusDecision({ leadId, decision, agentId = "", age
     p_reason: reason,
   });
   if (error) throw new Error(error.message || "Could not save the bonus decision.");
+  reportCache.clear();
+  return data || {};
+}
+
+export async function setCompanionBonusDecision({ leadId, decision, agentName = "", reason }) {
+  const { data, error } = await requiredClient().rpc("dashboard_set_companion_bonus_decision", {
+    p_lead_id: Number(leadId), p_decision: decision, p_agent_name: agentName || null, p_reason: reason,
+  });
+  if (error) throw new Error(error.message || "Could not save the companion bonus decision.");
   reportCache.clear();
   return data || {};
 }
