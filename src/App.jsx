@@ -58,6 +58,7 @@ const initialFilters = {
   agent: "",
   vendor: "",
   leadType: "",
+  creationOrigin: "",
   state: "",
   city: "",
   counties: [],
@@ -110,6 +111,11 @@ function FilterPanel({ draft, setDraft, apply, options, geoOptions, open, setOpe
       {select("Agent", "agent", options.agents, "All agents")}
       {select("Vendor", "vendor", options.vendors, "All vendors")}
       {select("Lead type", "leadType", options.lead_types, "All lead types")}
+      {select("Lead origin", "creationOrigin", [
+        { value: "seller_to_buyer", label: "Buyer created from Seller Form" },
+        { value: "buyer_to_seller", label: "Seller created from Buyer Form" },
+        { value: "original", label: "Original / not companion" },
+      ], "All original and companion leads")}
       <label>State<select value={draft.state} onChange={(event) => setDraft({ ...draft, state: event.target.value, city: "", counties: [], metros: [], geoState: "", countyFilterActive: false, metroFilterActive: false })}><option value="">All states</option>{(options.states || []).map((choice) => <option key={choice} value={choice}>{choice}</option>)}</select></label>
       <MultiSelectChecklist label="Counties" noun="counties" choices={geoOptions.counties || []} selected={draft.counties} disabled={!draft.state || draft.geoState !== draft.state} onChange={(counties, countyFilterActive) => setDraft({ ...draft, counties, countyFilterActive })} />
       <MultiSelectChecklist label="Metro areas" noun="metros" choices={geoOptions.metros || []} selected={draft.metros} disabled={!draft.state || draft.geoState !== draft.state} onChange={(metros, metroFilterActive) => setDraft({ ...draft, metros, metroFilterActive })} />
