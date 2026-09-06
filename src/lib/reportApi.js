@@ -12,6 +12,26 @@ const rpcNames = Object.freeze({
 const reportCache = new Map();
 const CACHE_MS = 60_000;
 const wait = (milliseconds) => new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+const transientReportError = (error) => /statement timeout|canceling statement|timed out|timeout|fetch failed|failed to fetch|network|connection reset|502|503|504/i.test(error?.message || "");
+
+async function rpcWithRetry(name, params, maximumAttempts = 4) {
+  let response;
+  let thrown;
+  const delays = [1000,2500,5000];
+  for (let attempt = 0; attempt < maximumAttempts; attempt += 1) {
+    try {
+      response = await requiredClient().rpc(name, params);
+      thrown = null;
+      if (!response.error || !transientReportError(response.error) || attempt === maximumAttempts - 1) return response;
+    } catch (error) {
+      thrown = error;
+      if (!transientReportError(error) || attempt === maximumAttempts - 1) throw error;
+    }
+    await wait(delays[Math.min(attempt,delays.length - 1)]);
+  }
+  if (thrown) throw thrown;
+  return response;
+}
 
 function requiredClient() {
   if (!supabase) throw new Error("Supabase is not configured for this build.");
@@ -57,24 +77,20 @@ export async function loadReportPage(page, filters, pagination = {}, { bypassCac
   const cacheKey = JSON.stringify([page, params]);
   const cached = reportCache.get(cacheKey);
   if (!bypassCache && cached && Date.now() - cached.savedAt < CACHE_MS) return cached.data;
-  let response = await requiredClient().rpc(name, params);
-  if (response.error && /statement timeout|canceling statement/i.test(response.error.message || "")) {
-    await wait(1200);
-    response = await requiredClient().rpc(name, params);
-  }
+  const response = await rpcWithRetry(name,params);
   const { data, error } = response;
   if (error) throw new Error(error.message || `Could not load ${page}.`);
   let result = data || {};
   if (page === "leads") result = await decorateCompanionRows(result);
   if (page === "team") {
-    const companion = await requiredClient().rpc("dashboard_companion_bonus", reportParameters(filters));
+    const companion = await rpcWithRetry("dashboard_companion_bonus",reportParameters(filters));
     if (companion.error) throw new Error(companion.error.message || "Could not load companion lead bonuses.");
     result = { ...result, companion_bonus: companion.data || {} };
   }
   if (page === "overview") {
     const [firstResponse, teamResponse] = await Promise.all([
-      requiredClient().rpc("dashboard_first_response_metrics", reportParameters(filters)),
-      requiredClient().rpc("dashboard_team", reportParameters(filters)),
+      rpcWithRetry("dashboard_first_response_metrics",reportParameters(filters)),
+      rpcWithRetry("dashboard_team",reportParameters(filters)),
     ]);
     const auditedLiveTotal = teamResponse.error
       ? null
@@ -116,7 +132,7 @@ export async function loadAllFilteredLeads(filters, selectedFields = [], onProgr
   let total = Number.POSITIVE_INFINITY;
   while (output.length < total) {
     const params = { ...reportParameters(filters, { page, pageSize: 250 }), p_fields: selectedFields };
-    const { data, error } = await requiredClient().rpc("dashboard_lead_export", params);
+    const { data, error } = await rpcWithRetry("dashboard_lead_export",params);
     if (error) throw new Error(error.message || "Could not prepare the full lead export.");
     const rows = Array.isArray(data?.rows) ? data.rows : [];
     total = Number(data?.total || 0);
@@ -131,11 +147,7 @@ export async function loadAllFilteredLeads(filters, selectedFields = [], onProgr
 }
 
 export async function matchCsvRows(rows) {
-  let response = await requiredClient().rpc("dashboard_csv_match", { p_rows: rows });
-  if (response.error && /statement timeout|canceling statement/i.test(response.error.message || "")) {
-    await wait(600);
-    response = await requiredClient().rpc("dashboard_csv_match", { p_rows: rows });
-  }
+  const response = await rpcWithRetry("dashboard_csv_match",{ p_rows: rows });
   const { data, error } = response;
   if (error) throw new Error(error.message || "CSV matching failed.");
   const matched = Array.isArray(data) ? data : data?.rows || [];
@@ -146,7 +158,7 @@ async function decorateCompanionRows(result, idField = "id") {
   const rows = Array.isArray(result?.rows) ? result.rows : [];
   const ids = [...new Set(rows.map((row) => Number(row?.[idField] || 0)).filter(Boolean))];
   if (!ids.length) return { ...(result || {}), rows };
-  const { data, error } = await requiredClient().rpc("dashboard_companion_origins", { p_lead_ids: ids });
+  const { data, error } = await rpcWithRetry("dashboard_companion_origins",{ p_lead_ids: ids });
   if (error) throw new Error(error.message || "Could not identify companion leads.");
   const byId = new Map((Array.isArray(data) ? data : []).map((item) => [Number(item.id), item]));
   return { ...(result || {}), rows: rows.map((row) => ({ ...row, ...(byId.get(Number(row?.[idField])) || {}) })) };
@@ -170,7 +182,7 @@ export async function loadAllFilteredCalls(filters, onProgress) {
   let total = Number.POSITIVE_INFINITY;
   while (output.length < total) {
     const params = reportParameters(filters, { page, pageSize: 200 });
-    const { data, error } = await requiredClient().rpc("dashboard_calls", params);
+    const { data, error } = await rpcWithRetry("dashboard_calls",params);
     if (error) throw new Error(error.message || "Could not load all matching calls.");
     const rows = Array.isArray(data?.rows) ? data.rows : [];
     total = Number(data?.total || 0);
