@@ -54,7 +54,20 @@ function mergedNotes(row) {
   const fallback = parseHistoricalNotes(row.note_text).filter((note) => !known.has(noteKey(note)));
   const combined = [...structured, ...fallback].sort((a, b) => Number(b.note_sequence || 0) - Number(a.note_sequence || 0) || String(b.note_time || "").localeCompare(String(a.note_time || "")));
   const latestText = cleanNoteText(row.latest_note);
-  if (latestText && !combined.some((note) => cleanNoteText(note.note_text) === latestText)) combined.unshift({ note_sequence: Number.MAX_SAFE_INTEGER, note_text: latestText, note_user_name: row.note_user_name, note_user_email: row.note_user_email, note_time: row.note_created_at, call_uuid: (row.recordings || []).find((call) => call.exact_match)?.call_uuid, call_date_time: (row.recordings || []).find((call) => call.exact_match)?.call_date_time });
+  if (latestText && !combined.some((note) => cleanNoteText(note.note_text) === latestText)) {
+    const latestAt = Date.parse(row.note_created_at || "");
+    const distance = (input) => {
+      const parsed = Date.parse(input || "");
+      return Number.isNaN(latestAt) || Number.isNaN(parsed) ? Number.POSITIVE_INFINITY : Math.abs(latestAt - parsed);
+    };
+    const linkedStructured = structured.filter((note) => note.call_uuid).sort((a,b) => distance(a.note_time) - distance(b.note_time))[0];
+    const linkedRecording = (row.recordings || []).filter((call) => call.call_uuid).sort((a,b) => {
+      if (Boolean(a.exact_match) !== Boolean(b.exact_match)) return a.exact_match ? -1 : 1;
+      return distance(a.sort_at || a.call_date_time) - distance(b.sort_at || b.call_date_time);
+    })[0];
+    const link = linkedStructured || linkedRecording || {};
+    combined.unshift({ note_sequence: Number.MAX_SAFE_INTEGER, note_text: latestText, note_user_name: row.note_user_name, note_user_email: row.note_user_email, note_time: row.note_created_at, call_id: link.call_id || link.id, call_uuid: link.call_uuid, call_date_time: link.call_date_time, duration_seconds: link.duration_seconds, call_user_name: link.call_user_name || link.user_name, direction: link.direction, recording_status: link.recording_status, link_method: link.link_method || (link.call_uuid ? "lead_timeline" : "") });
+  }
   return combined;
 }
 
