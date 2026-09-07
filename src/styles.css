@@ -201,7 +201,7 @@ tbody tr:hover { background: #fafbfd; }
 .bonus-state { display: inline-flex; border-radius: 999px; padding: 4px 8px; font-size: 8px; font-weight: 800; text-transform: capitalize; white-space: nowrap; }
 .bonus-state.payable { color: #08705e; background: #e4f7f1; }
 .bonus-state.needs_review, .bonus-state.waiting_for_note { color: #8a5b00; background: #fff2c8; }
-.bonus-state.missing_formal_note, .bonus-state.retracted { color: #a1463e; background: #fff0ed; }
+.bonus-state.missing_formal_note, .bonus-state.missing_isa, .bonus-state.missing_live_disposition, .bonus-state.retracted { color: #a1463e; background: #fff0ed; }
 .lead-review-link { border: 0; background: transparent; padding: 0; text-align: left; color: inherit; cursor: pointer; }
 .lead-review-link strong, .lead-review-link small { display: block; }
 .lead-review-link strong { color: #143f76; text-decoration: underline; text-decoration-color: #aac5e3; text-underline-offset: 3px; }
