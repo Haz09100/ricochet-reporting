@@ -375,12 +375,25 @@ export async function bridgeRequest(path, options = {}) {
   headers.set("authorization", `Bearer ${token}`);
   headers.set("accept", options.accept || "application/json");
   if (options.body && !headers.has("content-type")) headers.set("content-type", "application/json");
-  const response = await fetch(`${config.workerUrl}${path}`, { ...options, headers });
-  if (!response.ok) {
+  const method = String(options.method || "GET").toUpperCase();
+  const attempts = method === "GET" ? 3 : 1;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    let response;
+    try {
+      response = await fetch(`${config.workerUrl}${path}`, { ...options, headers });
+    } catch (error) {
+      if (attempt < attempts) { await new Promise((resolve) => setTimeout(resolve, 350 * attempt)); continue; }
+      throw new Error(`Could not reach the private report bridge at ${config.workerUrl}. Check the GitHub WORKER_BASE_URL and the bridge ALLOWED_ORIGINS setting.`);
+    }
+    if (response.ok) return response;
     const body = await response.json().catch(() => ({}));
+    if (attempt < attempts && [429,502,503,504].includes(response.status)) {
+      await new Promise((resolve) => setTimeout(resolve, 350 * attempt));
+      continue;
+    }
     throw new Error(body.error || `Private bridge returned HTTP ${response.status}.`);
   }
-  return response;
+  throw new Error("The private report bridge did not respond.");
 }
 
 export async function runAiAction(path, payload) {
