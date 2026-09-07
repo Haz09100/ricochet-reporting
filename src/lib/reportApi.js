@@ -3,7 +3,7 @@ import { currentAccessToken, supabase } from "./supabase.js";
 
 const rpcNames = Object.freeze({
   overview: "dashboard_overview",
-  team: "dashboard_team",
+  team: "dashboard_team_activity",
   calls: "dashboard_calls",
   notes: "dashboard_notes",
   leads: "dashboard_leads",
@@ -83,14 +83,18 @@ export async function loadReportPage(page, filters, pagination = {}, { bypassCac
   let result = data || {};
   if (page === "leads") result = await decorateCompanionRows(result);
   if (page === "team") {
-    const companion = await rpcWithRetry("dashboard_companion_bonus",reportParameters(filters));
+    const [liveBonus,companion] = await Promise.all([
+      rpcWithRetry("dashboard_live_bonus",reportParameters(filters)),
+      rpcWithRetry("dashboard_companion_bonus",reportParameters(filters)),
+    ]);
+    if (liveBonus.error) throw new Error(liveBonus.error.message || "Could not load the live-lead bonus ledger.");
     if (companion.error) throw new Error(companion.error.message || "Could not load companion lead bonuses.");
-    result = { ...result, companion_bonus: companion.data || {} };
+    result = { ...result, ...(liveBonus.data || {}), companion_bonus: companion.data || {} };
   }
   if (page === "overview") {
     const [firstResponse, teamResponse] = await Promise.all([
       rpcWithRetry("dashboard_first_response_metrics",reportParameters(filters)),
-      rpcWithRetry("dashboard_team",reportParameters(filters)),
+      rpcWithRetry("dashboard_live_bonus",reportParameters(filters)),
     ]);
     const auditedLiveTotal = teamResponse.error
       ? null
