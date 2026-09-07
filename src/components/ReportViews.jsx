@@ -127,6 +127,31 @@ function SortHeader({ id, label, sort, onSort }) {
   return <th aria-sort={direction === "asc" ? "ascending" : direction === "desc" ? "descending" : "none"}><button className={`sort-header${active ? " active" : ""}`} onClick={() => onSort(id)}><span>{label}</span><i aria-hidden="true">{active ? direction === "asc" ? "▲" : "▼" : "↕"}</i></button></th>;
 }
 
+function BonusDecisionDialog({ request, busy, onCancel, onSubmit }) {
+  const [agentName, setAgentName] = useState("");
+  const [reason, setReason] = useState("");
+  useEffect(() => {
+    setAgentName(request?.suggestedAgent || "");
+    setReason("");
+  }, [request]);
+  if (!request) return null;
+  const approving = request.decision === "approved";
+  const title = approving ? "Approve bonus agent" : request.decision === "retracted" ? "Retract bonus" : "Restore automatic review";
+  const submitLabel = approving ? "Approve agent" : request.decision === "retracted" ? "Retract bonus" : "Restore review";
+  const valid = (!approving || agentName.trim()) && reason.trim().length >= 3;
+  return <div className="review-modal-backdrop decision-dialog-backdrop" role="presentation">
+    <form className="review-modal decision-dialog" onSubmit={(event) => { event.preventDefault(); if (valid && !busy) onSubmit({ agentName: agentName.trim(), reason: reason.trim() }); }}>
+      <div className="review-modal-header"><div><span className="eyebrow">Audited manager action</span><h2>{title}</h2><p>{request.row?.lead_name || `Lead ${request.row?.id}`}</p></div><button type="button" className="icon-button" onClick={onCancel} aria-label="Close"><X /></button></div>
+      <div className="decision-dialog-body">
+        {approving && <label>Agent receiving this bonus<input autoFocus value={agentName} onChange={(event) => setAgentName(event.target.value)} placeholder="Agent name" /></label>}
+        <label>Reason<textarea autoFocus={!approving} value={reason} onChange={(event) => setReason(event.target.value)} placeholder={approving ? "Why is this the correct agent?" : request.decision === "retracted" ? "Why should this bonus be retracted?" : "Why should automatic review be restored?"} /></label>
+        <small>The decision and reason are saved to the audit history.</small>
+      </div>
+      <div className="review-modal-footer"><button type="button" className="button secondary" onClick={onCancel} disabled={busy}>Cancel</button><button type="submit" className={`button ${request.decision === "retracted" ? "danger-button" : "primary"}`} disabled={!valid || busy}>{busy ? "Saving…" : submitLabel}</button></div>
+    </form>
+  </div>;
+}
+
 function LeadReviewPopup({ rows, selectedLeadId, setSelectedLeadId }) {
   const [detail, setDetail] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -217,6 +242,7 @@ function CompanionBonusReport({ data, setToast, onDataChanged }) {
   const [originFilter, setOriginFilter] = useState("all");
   const [busyLead, setBusyLead] = useState(null);
   const [selectedLeadId, setSelectedLeadId] = useState(null);
+  const [decisionRequest, setDecisionRequest] = useState(null);
   const totals = data?.totals || {};
   const canManage = data?.can_manage_bonus === true;
   const agents = data?.agents || [];
@@ -230,20 +256,23 @@ function CompanionBonusReport({ data, setToast, onDataChanged }) {
     lead: { value: "lead_name" }, created: { value: "created_date_eastern", type: "date" }, type: { value: "lead_type" },
     origin: { value: "creation_label" }, agent: { value: "credited_agent_name" }, state: { value: "bonus_state" },
   }, "created", "desc");
-  const decide = async (row, decision) => {
-    const suggested = row.credited_agent_name || row.originating_agent || "";
-    let agentName = suggested;
-    if (decision === "approved") {
-      agentName = window.prompt("Agent receiving this companion-lead bonus", suggested);
-      if (!agentName) return;
-    }
-    const reason = window.prompt(decision === "retracted" ? "Why is this companion bonus being retracted?" : decision === "reset" ? "Why are you restoring automatic review?" : "Why are you approving this agent?");
-    if (!reason) return;
+  const requestDecision = (row, decision) => setDecisionRequest({ row, decision, suggestedAgent: row.credited_agent_name || row.originating_agent || "" });
+  const decide = async ({ agentName, reason }) => {
+    const { row, decision } = decisionRequest;
     setBusyLead(row.id);
     try {
-      await setCompanionBonusDecision({ leadId: row.id, decision, agentName: decision === "approved" ? agentName : "", reason });
+      await setCompanionBonusDecision({
+        leadId: row.source_system === "leadflow-d1" ? null : row.id,
+        sourceLeadId: row.source_lead_id,
+        destinationFubPersonId: row.destination_fub_person_id,
+        sourceSnapshot: row.source_snapshot,
+        decision,
+        agentName: decision === "approved" ? agentName : "",
+        reason,
+      });
       setToast(decision === "retracted" ? "Companion bonus retracted." : decision === "reset" ? "Companion lead returned to automatic review." : `Companion bonus approved for ${agentName}.`);
       await onDataChanged?.();
+      setDecisionRequest(null);
     } catch (error) { setToast(error.message, true); }
     finally { setBusyLead(null); }
   };
@@ -256,15 +285,17 @@ function CompanionBonusReport({ data, setToast, onDataChanged }) {
     ["Retracted",totals.retracted,"Removed by manager"],
   ];
   return <section className="live-ownership-section companion-bonus-section">
-    <div className="section-heading"><div><span className="eyebrow">Buyer / seller split bonuses</span><h2>Companion lead creation ledger</h2><p>A Seller Form stays Seller and its generated buy side is counted as “Buyer created from Seller Form.” A Buyer Form stays Buyer and its generated sell side is counted separately. This ledger uses the ISA written in the generated form and does not change the live-lead bonus total above.</p></div></div>
+    <div className="section-heading"><div><span className="eyebrow">Buyer / seller split bonuses</span><h2>Companion lead creation ledger</h2><p>A Seller Form stays Seller and its generated buy side is counted as “Buyer created from Seller Form.” A Buyer Form stays Buyer and its generated sell side is counted separately. LeadFlow D1 creation metadata is the source of truth and this ledger does not change the live-lead bonus total above.</p></div></div>
+    {data?.source_warning && <ErrorBox message={data.source_warning} />}
     <div className="metric-grid ownership-metrics">{cards.map(([label,amount,note],index) => <article className={`metric-card ${index >= 4 ? "gold" : "green"}`} key={label}><span>{label}</span><strong>{number(amount)}</strong><small>{note}</small></article>)}</div>
     <article className="panel report-panel"><div className="panel-heading"><div><span className="eyebrow">Payable by originating agent</span><h3>Companion bonus count</h3><p>Only companion leads with an identified ISA or a manager approval are payable.</p></div><button className="button secondary" disabled={!agents.length} onClick={() => downloadCsv("ricochet-payable-companion-bonuses.csv",agentSort.rows)}><Download size={15} />Export companion bonuses</button></div>
       {!agents.length ? <Empty message="No payable companion bonuses matched this range." /> : <div className="table-wrap"><table><thead><tr><SortHeader id="agent" label="Originating agent" sort={agentSort.sort} onSort={agentSort.requestSort} /><SortHeader id="payable" label="Payable bonuses" sort={agentSort.sort} onSort={agentSort.requestSort} /><SortHeader id="buyers" label="Buyers from Seller Forms" sort={agentSort.sort} onSort={agentSort.requestSort} /><SortHeader id="sellers" label="Sellers from Buyer Forms" sort={agentSort.sort} onSort={agentSort.requestSort} /><SortHeader id="approved" label="Manager approved" sort={agentSort.sort} onSort={agentSort.requestSort} /></tr></thead><tbody>{agentSort.rows.map((row,index) => <tr key={row.owner_key || index}><td><strong>{value(row,"agent")}</strong></td><td><span className="ownership-confirmed">{number(row.payable_companion_leads)}</span></td><td>{number(row.buyers_from_seller)}</td><td>{number(row.sellers_from_buyer)}</td><td>{number(row.manager_approved)}</td></tr>)}</tbody></table></div>}
     </article>
     <article className="panel report-panel bonus-review-panel"><div className="panel-heading"><div><span className="eyebrow">Created companion leads</span><h3>Review and pay generated buyer/seller opportunities</h3><p>Click a lead to open its complete record. Use the buttons to correct the credited agent or retract a companion bonus.</p></div><div className="segmented"><button className={originFilter === "all" ? "active" : ""} onClick={() => setOriginFilter("all")}>All</button><button className={originFilter === "seller_to_buyer" ? "active" : ""} onClick={() => setOriginFilter("seller_to_buyer")}>Created buyers</button><button className={originFilter === "buyer_to_seller" ? "active" : ""} onClick={() => setOriginFilter("buyer_to_seller")}>Created sellers</button></div></div>
-      {!visible.length ? <Empty message="No companion leads matched this selection." /> : <div className="table-wrap"><table><thead><tr><SortHeader id="lead" label="Lead" sort={ledgerSort.sort} onSort={ledgerSort.requestSort} /><SortHeader id="created" label="Created date" sort={ledgerSort.sort} onSort={ledgerSort.requestSort} /><SortHeader id="type" label="Lead type" sort={ledgerSort.sort} onSort={ledgerSort.requestSort} /><SortHeader id="origin" label="Created from" sort={ledgerSort.sort} onSort={ledgerSort.requestSort} /><SortHeader id="agent" label="Bonus agent" sort={ledgerSort.sort} onSort={ledgerSort.requestSort} /><SortHeader id="state" label="Bonus state" sort={ledgerSort.sort} onSort={ledgerSort.requestSort} /><th>Actions</th></tr></thead><tbody>{ledgerSort.rows.map((row) => <tr key={row.id}><td><button className="lead-review-link" onClick={() => setSelectedLeadId(row.id)}><strong>{row.lead_name || `Lead ${row.id}`}</strong><small>ID {row.id} · Open full record</small></button></td><td>{value(row,"created_date_eastern")}</td><td>{value(row,"lead_type")}</td><td><span className="tag">{value(row,"creation_label")}</span></td><td>{value(row,"credited_agent_name")}</td><td><span className={`bonus-state ${row.bonus_state}`}>{String(row.bonus_state || "unknown").replaceAll("_"," ")}</span></td><td>{canManage ? <div className="bonus-actions">{row.bonus_state === "needs_review" && <button className="text-action" disabled={busyLead === row.id} onClick={() => decide(row,"approved")}>Approve agent</button>}{row.bonus_state !== "retracted" && <button className="text-action danger" disabled={busyLead === row.id} onClick={() => decide(row,"retracted")}>Retract</button>}{row.bonus_state === "retracted" && <button className="text-action" disabled={busyLead === row.id} onClick={() => decide(row,"reset")}>Restore</button>}</div> : <span className="muted">Manager only</span>}</td></tr>)}</tbody></table></div>}
+      {!visible.length ? <Empty message="No companion leads matched this selection." /> : <div className="table-wrap"><table><thead><tr><SortHeader id="lead" label="Lead" sort={ledgerSort.sort} onSort={ledgerSort.requestSort} /><SortHeader id="created" label="Created date" sort={ledgerSort.sort} onSort={ledgerSort.requestSort} /><SortHeader id="type" label="Lead type" sort={ledgerSort.sort} onSort={ledgerSort.requestSort} /><SortHeader id="origin" label="Created from" sort={ledgerSort.sort} onSort={ledgerSort.requestSort} /><SortHeader id="agent" label="Bonus agent" sort={ledgerSort.sort} onSort={ledgerSort.requestSort} /><SortHeader id="state" label="Bonus state" sort={ledgerSort.sort} onSort={ledgerSort.requestSort} /><th>Actions</th></tr></thead><tbody>{ledgerSort.rows.map((row) => <tr key={row.id}><td>{row.source_system === "leadflow-d1" ? <span className="lead-review-link static"><strong>{row.lead_name || `Lead ${row.source_lead_id}`}</strong><small>LeadFlow ID {row.source_lead_id}</small></span> : <button className="lead-review-link" onClick={() => setSelectedLeadId(row.id)}><strong>{row.lead_name || `Lead ${row.id}`}</strong><small>ID {row.id} · Open full record</small></button>}</td><td>{value(row,"created_date_eastern")}</td><td>{value(row,"lead_type")}</td><td><span className="tag">{value(row,"creation_label")}</span></td><td>{value(row,"credited_agent_name")}</td><td><span className={`bonus-state ${row.bonus_state}`}>{String(row.bonus_state || "unknown").replaceAll("_"," ")}</span></td><td>{canManage ? <div className="bonus-actions">{row.bonus_state === "needs_review" && <button className="text-action" disabled={busyLead === row.id} onClick={() => requestDecision(row,"approved")}>Approve agent</button>}{row.bonus_state !== "retracted" && <button className="text-action danger" disabled={busyLead === row.id} onClick={() => requestDecision(row,"retracted")}>Retract</button>}{row.bonus_state === "retracted" && <button className="text-action" disabled={busyLead === row.id} onClick={() => requestDecision(row,"reset")}>Restore</button>}</div> : <span className="muted">Manager only</span>}</td></tr>)}</tbody></table></div>}
     </article>
     {selectedLeadId && <LeadReviewPopup rows={ledgerSort.rows} selectedLeadId={selectedLeadId} setSelectedLeadId={setSelectedLeadId} />}
+    <BonusDecisionDialog request={decisionRequest} busy={busyLead === decisionRequest?.row?.id} onCancel={() => !busyLead && setDecisionRequest(null)} onSubmit={decide} />
   </section>;
 }
 
@@ -275,6 +306,7 @@ function LiveBonusReport({ data, setToast, onDataChanged }) {
   const [reviewDetail, setReviewDetail] = useState(null);
   const [reviewLoading, setReviewLoading] = useState(false);
   const [reviewError, setReviewError] = useState("");
+  const [decisionRequest, setDecisionRequest] = useState(null);
   const totals = data?.live_bonus_totals || {};
   const canManage = data?.can_manage_bonus === true;
   const agents = data?.live_bonus_agents || [];
@@ -321,22 +353,17 @@ function LiveBonusReport({ data, setToast, onDataChanged }) {
       : (offset > 0 ? 0 : ledgerSort.rows.length - 1);
     setSelectedLeadId(ledgerSort.rows[next].id);
   };
-  const decide = async (row, decision) => {
-    const suggestedAgent = row.form_isa || row.note_owner || "";
-    let agentName = row.credited_agent_name || suggestedAgent;
-    if (decision === "approved") {
-      agentName = window.prompt("Agent receiving this bonus", suggestedAgent);
-      if (!agentName) return false;
-    }
-    const reason = window.prompt(decision === "retracted" ? "Why is this live status being retracted?" : decision === "reset" ? "Why are you restoring automatic review?" : "Why are you approving this agent?");
-    if (!reason) return false;
+  const requestDecision = (row, decision, advance = false) => setDecisionRequest({ row, decision, advance, suggestedAgent: row.credited_agent_name || row.form_isa || row.note_owner || "" });
+  const decide = async ({ agentName, reason }) => {
+    const { row, decision, advance } = decisionRequest;
     setBusyLead(row.id);
     try {
       await setLiveBonusDecision({ leadId: row.id, decision, agentName: decision === "approved" ? agentName : "", reason });
       setToast(decision === "retracted" ? "Bonus retracted and saved to the audit history." : decision === "reset" ? "Lead returned to automatic review." : `Bonus approved for ${agentName}.`);
       await onDataChanged?.();
-      return true;
-    } catch (error) { setToast(error.message, true); return false; }
+      setDecisionRequest(null);
+      if (advance) moveReview(1);
+    } catch (error) { setToast(error.message, true); }
     finally { setBusyLead(null); }
   };
   return <section className="live-ownership-section">
@@ -345,9 +372,10 @@ function LiveBonusReport({ data, setToast, onDataChanged }) {
     <article className="panel report-panel"><div className="panel-heading"><div><span className="eyebrow">Payable by agent</span><h3>Monthly bonus count</h3><p>This is the number to use for payroll. Pending, disputed, missing-note, and retracted leads are excluded.</p></div><button className="button secondary" disabled={!agents.length} onClick={() => downloadCsv("ricochet-payable-live-bonuses.csv", agentSort.rows)}><Download size={15} />Export bonus CSV</button></div>{!agents.length ? <Empty message="No payable bonuses matched this range." /> : <div className="table-wrap"><table><thead><tr><SortHeader id="agent" label="Agent" sort={agentSort.sort} onSort={agentSort.requestSort} /><SortHeader id="payable" label="Payable bonuses" sort={agentSort.sort} onSort={agentSort.requestSort} /><SortHeader id="transfer" label="2.3 transfer" sort={agentSort.sort} onSort={agentSort.requestSort} /><SortHeader id="callback" label="2.4 call back" sort={agentSort.sort} onSort={agentSort.requestSort} /><SortHeader id="text" label="2.5 group text" sort={agentSort.sort} onSort={agentSort.requestSort} /><SortHeader id="automatic" label="Automatic" sort={agentSort.sort} onSort={agentSort.requestSort} /><SortHeader id="approved" label="Manager approved" sort={agentSort.sort} onSort={agentSort.requestSort} /></tr></thead><tbody>{agentSort.rows.map((row,index) => <tr key={row.owner_key || index}><td><strong>{value(row,"agent")}</strong><small>{row.agent_id ? `ID ${row.agent_id}` : value(row,"agent_email")}</small></td><td><span className="ownership-confirmed">{number(row.payable_live_leads)}</span></td><td>{number(row.live_transfers)}</td><td>{number(row.live_call_backs)}</td><td>{number(row.live_texts)}</td><td>{number(row.auto_approved)}</td><td>{number(row.manager_approved)}</td></tr>)}</tbody></table></div>}</article>
     <article className="panel report-panel bonus-review-panel">
       <div className="panel-heading"><div><span className="eyebrow">Audit and corrections</span><h3>Review every live lead</h3><p>The evidence reason now distinguishes a missing form, missing ISA, missing live disposition, and an owner conflict.</p></div><div className="segmented"><button className={stateFilter === "all" ? "active" : ""} onClick={() => setStateFilter("all")}>All</button><button className={stateFilter === "needs_review" ? "active" : ""} onClick={() => setStateFilter("needs_review")}>Review</button><button className={stateFilter === "waiting_or_missing" ? "active" : ""} onClick={() => setStateFilter("waiting_or_missing")}>Incomplete evidence</button><button className={stateFilter === "payable" ? "active" : ""} onClick={() => setStateFilter("payable")}>Payable</button><button className={stateFilter === "retracted" ? "active" : ""} onClick={() => setStateFilter("retracted")}>Retracted</button></div></div>
-      {!visible.length ? <Empty message="No live leads matched this review state." /> : <div className="table-wrap"><table><thead><tr><SortHeader id="lead" label="Lead" sort={ledgerSort.sort} onSort={ledgerSort.requestSort} /><SortHeader id="first_live" label="First live date" sort={ledgerSort.sort} onSort={ledgerSort.requestSort} /><SortHeader id="disposition" label="Disposition" sort={ledgerSort.sort} onSort={ledgerSort.requestSort} /><SortHeader id="owner" label="Formal-note owner" sort={ledgerSort.sort} onSort={ledgerSort.requestSort} /><SortHeader id="isa" label="Form ISA" sort={ledgerSort.sort} onSort={ledgerSort.requestSort} /><SortHeader id="state" label="Evidence state" sort={ledgerSort.sort} onSort={ledgerSort.requestSort} /><SortHeader id="decision" label="Reason / decision" sort={ledgerSort.sort} onSort={ledgerSort.requestSort} /><th>Actions</th></tr></thead><tbody>{ledgerSort.rows.map((row) => <tr key={row.id}><td><button className="lead-review-link" onClick={() => setSelectedLeadId(row.id)}><strong>{row.lead_name || `Lead ${row.id}`}</strong><small>ID {row.id} · Open full review</small></button></td><td>{value(row,"first_live_date_eastern")}</td><td>{value(row,"original_live_status")}</td><td>{value(row,"note_owner")}</td><td>{value(row,"form_isa")}</td><td><span className={`bonus-state ${row.bonus_state}`}>{String(row.bonus_state || "unknown").replaceAll("_"," ")}</span></td><td>{row.manual_decision ? <><strong>{row.manual_decision}</strong><small>{row.decision_reason || ""}</small></> : <small>{row.gate_reason || "Automatic review"}</small>}</td><td>{canManage ? <div className="bonus-actions">{["needs_review","missing_isa","missing_live_disposition"].includes(row.bonus_state) && <button className="text-action" disabled={busyLead === row.id} onClick={() => decide(row,"approved")}>Approve agent</button>}{row.bonus_state !== "retracted" && <button className="text-action danger" disabled={busyLead === row.id} onClick={() => decide(row,"retracted")}>Retract</button>}{row.bonus_state === "retracted" && <button className="text-action" disabled={busyLead === row.id} onClick={() => decide(row,"reset")}>Restore review</button>}</div> : <span className="muted">Manager only</span>}</td></tr>)}</tbody></table></div>}
+      {!visible.length ? <Empty message="No live leads matched this review state." /> : <div className="table-wrap"><table><thead><tr><SortHeader id="lead" label="Lead" sort={ledgerSort.sort} onSort={ledgerSort.requestSort} /><SortHeader id="first_live" label="First live date" sort={ledgerSort.sort} onSort={ledgerSort.requestSort} /><SortHeader id="disposition" label="Disposition" sort={ledgerSort.sort} onSort={ledgerSort.requestSort} /><SortHeader id="owner" label="Formal-note owner" sort={ledgerSort.sort} onSort={ledgerSort.requestSort} /><SortHeader id="isa" label="Form ISA" sort={ledgerSort.sort} onSort={ledgerSort.requestSort} /><SortHeader id="state" label="Evidence state" sort={ledgerSort.sort} onSort={ledgerSort.requestSort} /><SortHeader id="decision" label="Reason / decision" sort={ledgerSort.sort} onSort={ledgerSort.requestSort} /><th>Actions</th></tr></thead><tbody>{ledgerSort.rows.map((row) => <tr key={row.id}><td><button className="lead-review-link" onClick={() => setSelectedLeadId(row.id)}><strong>{row.lead_name || `Lead ${row.id}`}</strong><small>ID {row.id} · Open full review</small></button></td><td>{value(row,"first_live_date_eastern")}</td><td>{value(row,"original_live_status")}</td><td>{value(row,"note_owner")}</td><td>{value(row,"form_isa")}</td><td><span className={`bonus-state ${row.bonus_state}`}>{String(row.bonus_state || "unknown").replaceAll("_"," ")}</span></td><td>{row.manual_decision ? <><strong>{row.manual_decision}</strong><small>{row.decision_reason || ""}</small></> : <small>{row.gate_reason || "Automatic review"}</small>}</td><td>{canManage ? <div className="bonus-actions">{["needs_review","missing_isa","missing_live_disposition"].includes(row.bonus_state) && <button className="text-action" disabled={busyLead === row.id} onClick={() => requestDecision(row,"approved")}>Approve agent</button>}{row.bonus_state !== "retracted" && <button className="text-action danger" disabled={busyLead === row.id} onClick={() => requestDecision(row,"retracted")}>Retract</button>}{row.bonus_state === "retracted" && <button className="text-action" disabled={busyLead === row.id} onClick={() => requestDecision(row,"reset")}>Restore review</button>}</div> : <span className="muted">Manager only</span>}</td></tr>)}</tbody></table></div>}
     </article>
-    {selectedLeadId && <LiveBonusReviewModal row={selectedRow} detail={reviewDetail} loading={reviewLoading} error={reviewError} canManage={canManage} busy={busyLead === selectedLeadId} onClose={() => setSelectedLeadId(null)} onPrevious={() => moveReview(-1)} onNext={() => moveReview(1)} onApprove={async () => { if (selectedRow && await decide(selectedRow,"approved")) moveReview(1); }} onReject={async () => { if (selectedRow && await decide(selectedRow,"retracted")) moveReview(1); }} />}
+    {selectedLeadId && <LiveBonusReviewModal row={selectedRow} detail={reviewDetail} loading={reviewLoading} error={reviewError} canManage={canManage} busy={busyLead === selectedLeadId} onClose={() => setSelectedLeadId(null)} onPrevious={() => moveReview(-1)} onNext={() => moveReview(1)} onApprove={() => selectedRow && requestDecision(selectedRow,"approved",true)} onReject={() => selectedRow && requestDecision(selectedRow,"retracted",true)} />}
+    <BonusDecisionDialog request={decisionRequest} busy={busyLead === decisionRequest?.row?.id} onCancel={() => !busyLead && setDecisionRequest(null)} onSubmit={decide} />
   </section>;
 }
 

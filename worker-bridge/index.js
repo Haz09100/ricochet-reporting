@@ -1,5 +1,7 @@
 const MAX_JSON_BYTES = 64 * 1024;
 const RECORDING_ID = /^[A-Za-z0-9_-]{8,160}$/;
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+const MAX_COMPANION_PAGES = 100;
 
 class HttpError extends Error {
   constructor(status, message) { super(message); this.status = status; }
@@ -172,6 +174,101 @@ async function proxyAi(request, env, pathname, ctx) {
   return new Response(upstream.body, { status: upstream.status, statusText: upstream.statusText, headers });
 }
 
+function easternDateKey(input) {
+  const parsed = new Date(input);
+  if (Number.isNaN(parsed.getTime())) return "";
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(parsed);
+  const byType = Object.fromEntries(parts.map(({ type, value }) => [type, value]));
+  return `${byType.year}-${byType.month}-${byType.day}`;
+}
+
+function companionRow(row) {
+  return {
+    sourceLeadId: String(row?.id || ""),
+    receivedAt: row?.receivedAt || null,
+    firstName: row?.firstName || "",
+    lastName: row?.lastName || "",
+    email: row?.email || "",
+    phone: row?.phone || "",
+    state: row?.state || "",
+    city: row?.city || "",
+    zip: row?.zip || "",
+    county: row?.county || "",
+    ricochetStatus: row?.ricochetStatus || "",
+    vendor: row?.vendor || "",
+    kind: row?.kind || "",
+    intent: row?.intent || "",
+    createdFromNote: row?.createdFromNote === true || Number(row?.createdFromNote) === 1,
+    noteCreationDirection: row?.noteCreationDirection || "",
+    splitGroupId: row?.splitGroupId || "",
+    destinationFubPersonId: String(row?.fubPersonId || ""),
+    fubAccountName: row?.fubAccountName || "",
+    agreementName: row?.agreementName || "",
+    deliveryStatus: row?.allocationStatus || row?.routingStatus || "",
+    sentBackground: row?.sentBackground || "",
+  };
+}
+
+async function proxyCompanionLeads(request, env, url) {
+  if (request.method !== "GET") throw new HttpError(405, "Companion reporting requires GET.");
+  if (!env.LEADFLOW_WORKER?.fetch || !String(env.LEADFLOW_ADMIN_TOKEN || "").trim()) {
+    throw new HttpError(503, "The LeadFlow reporting connection is not configured on the bridge.");
+  }
+  const from = String(url.searchParams.get("from") || "");
+  const to = String(url.searchParams.get("to") || "");
+  if (!ISO_DATE.test(from) || !ISO_DATE.test(to) || from > to) throw new HttpError(400, "A valid From and To date is required.");
+  const span = Math.floor((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86_400_000);
+  if (!Number.isFinite(span) || span > 370) throw new HttpError(400, "Companion report ranges are limited to 370 days.");
+
+  const rows = [];
+  let total = Number.POSITIVE_INFINITY;
+  for (let page = 1; page <= MAX_COMPANION_PAGES && (page - 1) * 200 < total; page += 1) {
+    const upstreamUrl = new URL("https://leadflow-private.internal/api/admin/leads");
+    upstreamUrl.searchParams.set("createdFilter", "created");
+    upstreamUrl.searchParams.set("page", String(page));
+    upstreamUrl.searchParams.set("pageSize", "200");
+    const upstream = await env.LEADFLOW_WORKER.fetch(new Request(upstreamUrl, {
+      method: "GET",
+      headers: {
+        accept: "application/json",
+        authorization: `Bearer ${String(env.LEADFLOW_ADMIN_TOKEN).trim()}`,
+      },
+    }));
+    if (!upstream.ok) throw new HttpError(502, `LeadFlow companion reporting returned HTTP ${upstream.status}.`);
+    const payload = await upstream.json().catch(() => null);
+    if (!payload || !Array.isArray(payload.leads)) throw new HttpError(502, "LeadFlow returned an invalid companion report.");
+    total = Number(payload.pagination?.total || payload.leads.length || 0);
+    if (!payload.leads.length) break;
+    let reachedOlderRows = false;
+    for (const raw of payload.leads) {
+      const row = companionRow(raw);
+      if (!row.createdFromNote || !["seller_to_buyer", "buyer_to_seller"].includes(row.noteCreationDirection)) continue;
+      const day = easternDateKey(row.receivedAt);
+      if (day && day < from) { reachedOlderRows = true; continue; }
+      if (day && day <= to) rows.push(row);
+    }
+    if (reachedOlderRows || payload.leads.length < 200) break;
+    if (page === MAX_COMPANION_PAGES) throw new HttpError(413, "The companion history is too large. Narrow the date range.");
+  }
+  return json(request, env, {
+    success: true,
+    source: "leadflow-d1",
+    from,
+    to,
+    rows,
+    totals: {
+      created: rows.length,
+      buyersFromSeller: rows.filter((row) => row.noteCreationDirection === "seller_to_buyer").length,
+      sellersFromBuyer: rows.filter((row) => row.noteCreationDirection === "buyer_to_seller").length,
+    },
+  });
+}
+
 async function handle(request, env, ctx) {
   const url = new URL(request.url);
   const pathname = url.pathname.replace(/\/+$/, "") || "/";
@@ -185,6 +282,7 @@ async function handle(request, env, ctx) {
   await verifyReportUser(request, env);
   if (pathname.startsWith("/recordings/") && (pathname.endsWith("/parts") || pathname.endsWith("/audio"))) return proxyRecording(request, env, pathname, url);
   if (pathname.startsWith("/ai/")) return proxyAi(request, env, pathname, ctx);
+  if (pathname === "/companion-leads") return proxyCompanionLeads(request, env, url);
   throw new HttpError(404, "Endpoint not found.");
 }
 

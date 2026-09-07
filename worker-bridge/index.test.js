@@ -9,6 +9,8 @@ function environment(handler) {
     ALLOWED_ORIGINS: "https://example.github.io,http://localhost:*",
     PRIVATE_WORKER_API_KEY: "private-secret",
     PRIVATE_D1_WORKER: { fetch: handler },
+    LEADFLOW_ADMIN_TOKEN: "leadflow-secret",
+    LEADFLOW_WORKER: { fetch: handler },
   };
 }
 
@@ -64,4 +66,32 @@ test("AI routes accept bounded JSON and only proxy allowlisted actions", async (
   assert.equal(new URL(upstream.url).pathname, "/admin/analyze-call");
   assert.equal(new URL(upstream.url).searchParams.get("call_event_id"), "42");
   assert.deepEqual(await upstream.json(), { call_event_id: 42 });
+});
+
+test("companion report uses LeadFlow's explicit creation metadata", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => Response.json(true);
+  let upstream;
+  const env = environment((request) => {
+    upstream = request;
+    return Response.json({
+      leads: [
+        { id: "companion-1", receivedAt: "2026-09-06T23:01:00Z", firstName: "Arvind", lastName: "Chandrasekaran", createdFromNote: true, noteCreationDirection: "seller_to_buyer" },
+        { id: "ordinary-1", receivedAt: "2026-09-06T18:00:00Z", createdFromNote: false, noteCreationDirection: "" },
+      ],
+      pagination: { total: 2 },
+    });
+  });
+  const response = await worker.fetch(new Request("https://bridge.test/companion-leads?from=2026-09-06&to=2026-09-06", {
+    headers: { origin: "https://example.github.io", authorization: "Bearer user-token" },
+  }), env, context);
+  globalThis.fetch = originalFetch;
+  assert.equal(response.status, 200);
+  assert.equal(new URL(upstream.url).pathname, "/api/admin/leads");
+  assert.equal(new URL(upstream.url).searchParams.get("createdFilter"), "created");
+  assert.equal(upstream.headers.get("authorization"), "Bearer leadflow-secret");
+  const body = await response.json();
+  assert.equal(body.totals.created, 1);
+  assert.equal(body.totals.buyersFromSeller, 1);
+  assert.equal(body.rows[0].sourceLeadId, "companion-1");
 });

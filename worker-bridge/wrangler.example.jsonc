@@ -1,7 +1,8 @@
 {
   "name": "ricochet-report-bridge",
   "main": "index.js",
-  "compatibility_date": "2026-08-25",
+  "compatibility_date": "2026-09-06",
+  "compatibility_flags": ["nodejs_compat"],
   "observability": { "enabled": true },
   "vars": {
     "SUPABASE_URL": "https://YOUR_PROJECT.supabase.co",
@@ -12,6 +13,10 @@
     {
       "binding": "PRIVATE_D1_WORKER",
       "service": "ricochet-lead-worker-d1-test"
+    },
+    {
+      "binding": "LEADFLOW_WORKER",
+      "service": "YOUR_LEADFLOW_WORKER_NAME"
     }
   ],
   "queues": {

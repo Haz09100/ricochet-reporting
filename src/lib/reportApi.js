@@ -13,6 +13,8 @@ const reportCache = new Map();
 const CACHE_MS = 60_000;
 const wait = (milliseconds) => new Promise((resolve) => window.setTimeout(resolve, milliseconds));
 const transientReportError = (error) => /statement timeout|canceling statement|timed out|timeout|fetch failed|failed to fetch|network|connection reset|502|503|504/i.test(error?.message || "");
+const compactText = (input) => String(input || "").replace(/\s+/g, " ").trim();
+const comparable = (input) => compactText(input).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 
 async function rpcWithRetry(name, params, maximumAttempts = 4) {
   let response;
@@ -83,13 +85,22 @@ export async function loadReportPage(page, filters, pagination = {}, { bypassCac
   let result = data || {};
   if (page === "leads") result = await decorateCompanionRows(result);
   if (page === "team") {
-    const [liveBonus,companion] = await Promise.all([
+    const [liveBonus,companion,authoritative] = await Promise.all([
       rpcWithRetry("dashboard_live_bonus",reportParameters(filters)),
       rpcWithRetry("dashboard_companion_bonus",reportParameters(filters)),
+      loadAuthoritativeCompanionBonus(filters, {}).then((data) => ({ data, error: null })).catch((error) => ({ data: null, error })),
     ]);
     if (liveBonus.error) throw new Error(liveBonus.error.message || "Could not load the live-lead bonus ledger.");
     if (companion.error) throw new Error(companion.error.message || "Could not load companion lead bonuses.");
-    result = { ...result, ...(liveBonus.data || {}), companion_bonus: companion.data || {} };
+    const fallbackCompanion = companion.data || {};
+    let companionBonus = authoritative.data
+      ? { ...authoritative.data, can_manage_bonus: fallbackCompanion.can_manage_bonus === true }
+      : {
+        ...fallbackCompanion,
+        source: "supabase-note-fallback",
+        source_warning: `LeadFlow verification is unavailable: ${authoritative.error?.message || "Unknown connection error"}`,
+      };
+    result = { ...result, ...(liveBonus.data || {}), companion_bonus: companionBonus };
   }
   if (page === "overview") {
     const [firstResponse, teamResponse] = await Promise.all([
@@ -115,6 +126,121 @@ export async function loadReportPage(page, filters, pagination = {}, { bypassCac
   }
   reportCache.set(cacheKey, { data: result, savedAt: Date.now() });
   return result;
+}
+
+function formField(text, label) {
+  const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const nextLabel = "(?:CURRENT(?:\\s+LIVING)?(?:\\s+STATUS)?(?:\\/LOCATION)?|VENDOR|LOCATION|PROPERTY|TARGET|REASON|FLEXIBLE|PRICE|FINANCING|PRIMARY|MOTIVATION|APPOINTMENT|AGENT|DISPOSITION|NOTES?)";
+  const match = String(text || "").match(new RegExp(`(?:^|[\\r\\n]|\\s)${escaped}\\s*:\\s*(.+?)(?=(?:[\\r\\n]|\\s+)${nextLabel}(?:[^:\\r\\n]{0,45})?\\s*:|$)`, "i"));
+  return compactText(match?.[1] || "").slice(0, 160);
+}
+
+function sourceCompanionMatches(row, filters) {
+  if (filters.creationOrigin === "original") return false;
+  if (filters.creationOrigin && row.noteCreationDirection !== filters.creationOrigin) return false;
+  if (filters.status && comparable(row.ricochetStatus) !== comparable(filters.status)) return false;
+  if (filters.vendor && comparable(row.vendor) !== comparable(filters.vendor)) return false;
+  if (filters.leadType && comparable(row.intent) !== comparable(filters.leadType)) return false;
+  if (filters.state && comparable(row.state) !== comparable(filters.state)) return false;
+  if (filters.city && comparable(row.city) !== comparable(filters.city)) return false;
+  if (filters.countyFilterActive && !(filters.counties || []).some((county) => comparable(county) === comparable(row.county))) return false;
+  const agent = formField(row.sentBackground, "ISA");
+  if (filters.agent && !comparable(agent).includes(comparable(filters.agent)) && !comparable(filters.agent).includes(comparable(agent))) return false;
+  if (filters.search) {
+    const haystack = comparable([row.firstName,row.lastName,row.email,row.phone,row.city,row.state,row.zip,row.destinationFubPersonId,row.sourceLeadId].join(" "));
+    if (!haystack.includes(comparable(filters.search))) return false;
+  }
+  return true;
+}
+
+function companionDate(input) {
+  const parsed = new Date(input);
+  if (Number.isNaN(parsed.getTime())) return input || "";
+  return new Intl.DateTimeFormat(undefined, { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).format(parsed);
+}
+
+function buildAuthoritativeCompanionBonus(sourceRows, decisions, fallback) {
+  const byId = new Map((decisions || []).map((item) => [String(item.source_lead_id), item]));
+  const ledger = sourceRows.map((row) => {
+    const manual = byId.get(String(row.sourceLeadId));
+    const originatingAgent = formField(row.sentBackground, "ISA");
+    const automaticState = originatingAgent ? "payable" : "needs_review";
+    const bonusState = manual?.decision === "retracted" ? "retracted" : manual?.decision === "approved" ? "payable" : automaticState;
+    return {
+      id: `leadflow:${row.sourceLeadId}`,
+      source_lead_id: row.sourceLeadId,
+      destination_fub_person_id: row.destinationFubPersonId,
+      lead_name: [row.firstName,row.lastName].filter(Boolean).join(" ") || `LeadFlow lead ${row.sourceLeadId}`,
+      created_date_eastern: companionDate(row.receivedAt),
+      created_at: row.receivedAt,
+      lead_type: row.noteCreationDirection === "seller_to_buyer" ? "Buyer" : "Seller",
+      creation_origin: row.noteCreationDirection,
+      creation_label: row.noteCreationDirection === "seller_to_buyer" ? "Buyer created from Seller Form" : "Seller created from Buyer Form",
+      originating_agent: originatingAgent,
+      credited_agent_name: manual?.decision === "approved" ? manual.credited_agent_name : originatingAgent,
+      bonus_state: bonusState,
+      manual_decision: manual?.decision || "",
+      decision_reason: manual?.reason || "",
+      state: row.state,
+      city: row.city,
+      county: row.county,
+      vendor: row.vendor,
+      delivery_status: row.deliveryStatus,
+      source_system: "leadflow-d1",
+      source_snapshot: {
+        source_lead_id: row.sourceLeadId,
+        destination_fub_person_id: row.destinationFubPersonId,
+        received_at: row.receivedAt,
+        lead_name: [row.firstName,row.lastName].filter(Boolean).join(" "),
+        creation_origin: row.noteCreationDirection,
+        originating_agent: originatingAgent,
+        state: row.state,
+        city: row.city,
+        vendor: row.vendor,
+      },
+    };
+  });
+  const payable = ledger.filter((row) => row.bonus_state === "payable");
+  const agentMap = new Map();
+  for (const row of payable) {
+    const key = comparable(row.credited_agent_name);
+    if (!key) continue;
+    const current = agentMap.get(key) || { owner_key: key, agent: row.credited_agent_name, payable_companion_leads: 0, buyers_from_seller: 0, sellers_from_buyer: 0, manager_approved: 0 };
+    current.payable_companion_leads += 1;
+    current.buyers_from_seller += row.creation_origin === "seller_to_buyer" ? 1 : 0;
+    current.sellers_from_buyer += row.creation_origin === "buyer_to_seller" ? 1 : 0;
+    current.manager_approved += row.manual_decision === "approved" ? 1 : 0;
+    agentMap.set(key,current);
+  }
+  return {
+    source: "leadflow-d1",
+    can_manage_bonus: fallback?.can_manage_bonus === true,
+    totals: {
+      created: ledger.length,
+      buyers_from_seller: ledger.filter((row) => row.creation_origin === "seller_to_buyer").length,
+      sellers_from_buyer: ledger.filter((row) => row.creation_origin === "buyer_to_seller").length,
+      payable: payable.length,
+      needs_review: ledger.filter((row) => row.bonus_state === "needs_review").length,
+      retracted: ledger.filter((row) => row.bonus_state === "retracted").length,
+    },
+    agents: [...agentMap.values()].sort((a,b) => b.payable_companion_leads - a.payable_companion_leads || a.agent.localeCompare(b.agent)),
+    ledger,
+  };
+}
+
+async function loadAuthoritativeCompanionBonus(filters, fallback) {
+  const query = new URLSearchParams({ from: filters.from, to: filters.to });
+  const response = await bridgeRequest(`/companion-leads?${query}`);
+  const payload = await response.json();
+  const sourceRows = (Array.isArray(payload.rows) ? payload.rows : []).filter((row) => sourceCompanionMatches(row,filters));
+  const sourceIds = sourceRows.map((row) => String(row.sourceLeadId || "")).filter(Boolean);
+  const decisions = [];
+  for (let index = 0; index < sourceIds.length; index += 500) {
+    const { data, error } = await rpcWithRetry("dashboard_companion_source_decisions", { p_source_lead_ids: sourceIds.slice(index,index + 500) });
+    if (error) throw new Error(error.message || "Could not load companion bonus decisions.");
+    decisions.push(...(Array.isArray(data) ? data : []));
+  }
+  return buildAuthoritativeCompanionBonus(sourceRows,decisions,fallback);
 }
 
 export async function loadFilterOptions(from, to) {
@@ -213,7 +339,20 @@ export async function setLiveBonusDecision({ leadId, decision, agentId = "", age
   return data || {};
 }
 
-export async function setCompanionBonusDecision({ leadId, decision, agentName = "", reason }) {
+export async function setCompanionBonusDecision({ leadId, sourceLeadId = "", destinationFubPersonId = "", sourceSnapshot = {}, decision, agentName = "", reason }) {
+  if (sourceLeadId) {
+    const { data, error } = await requiredClient().rpc("dashboard_set_companion_source_bonus_decision", {
+      p_source_lead_id: String(sourceLeadId),
+      p_destination_fub_person_id: destinationFubPersonId || null,
+      p_decision: decision,
+      p_agent_name: agentName || null,
+      p_reason: reason,
+      p_source_snapshot: sourceSnapshot || {},
+    });
+    if (error) throw new Error(error.message || "Could not save the LeadFlow companion bonus decision.");
+    reportCache.clear();
+    return data || {};
+  }
   const { data, error } = await requiredClient().rpc("dashboard_set_companion_bonus_decision", {
     p_lead_id: Number(leadId), p_decision: decision, p_agent_name: agentName || null, p_reason: reason,
   });

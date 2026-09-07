@@ -188,6 +188,173 @@ as $$
   select lower(regexp_replace(coalesce(p_value,''), '[^a-zA-Z0-9]+', '', 'g'))
 $$;
 
+-- Convert common ISA nicknames to a controlled canonical first name.  This is
+-- intentionally small and deterministic because the result controls bonus pay.
+create or replace function report_api.canonical_agent_first_name(p_value text)
+returns text
+language sql
+immutable
+set search_path = ''
+as $$
+  with cleaned as (
+    select lower(trim(regexp_replace(
+      split_part(coalesce(p_value,''),'@',1),
+      '[^a-zA-Z]+',' ','g'
+    ))) value
+  ), first_name as (
+    select split_part(value,' ',1) value from cleaned
+  )
+  select case value
+    when 'patty' then 'patricia'
+    when 'patti' then 'patricia'
+    when 'pattie' then 'patricia'
+    when 'trish' then 'patricia'
+    when 'tricia' then 'patricia'
+    when 'vince' then 'vincent'
+    when 'vinny' then 'vincent'
+    when 'matt' then 'matthew'
+    when 'tom' then 'thomas'
+    when 'tommy' then 'thomas'
+    when 'tomas' then 'thomas'
+    when 'liz' then 'elizabeth'
+    when 'beth' then 'elizabeth'
+    when 'lizzy' then 'elizabeth'
+    when 'manny' then 'manuel'
+    when 'manolo' then 'manuel'
+    when 'mel' then 'melissa'
+    when 'mark' then 'marc'
+    when 'fran' then 'francisco'
+    when 'frank' then 'francisco'
+    when 'frankie' then 'francisco'
+    when 'paco' then 'francisco'
+    when 'val' then 'valerie'
+    when 'valeri' then 'valerie'
+    when 'les' then 'leslie'
+    when 'jase' then 'jason'
+    when 'abe' then 'abraham'
+    when 'dieg' then 'diego'
+    else value
+  end
+  from first_name
+$$;
+
+-- Permit one missing, extra, or changed character in a surname-sized token.
+-- Short words are excluded to avoid loose matches on initials and fragments.
+create or replace function report_api.agent_name_word_near(p_left text,p_right text)
+returns boolean
+language plpgsql
+immutable
+set search_path = ''
+as $$
+declare
+  left_word text := lower(regexp_replace(coalesce(p_left,''),'[^a-zA-Z]','','g'));
+  right_word text := lower(regexp_replace(coalesce(p_right,''),'[^a-zA-Z]','','g'));
+  left_length integer;
+  right_length integer;
+  left_position integer := 1;
+  right_position integer := 1;
+  differences integer := 0;
+begin
+  if left_word='' or right_word='' then return false; end if;
+  if left_word=right_word then return true; end if;
+  if least(length(left_word),length(right_word))<4 then return false; end if;
+
+  left_length := length(left_word);
+  right_length := length(right_word);
+  if abs(left_length-right_length)>1 then return false; end if;
+
+  while left_position<=left_length and right_position<=right_length loop
+    if substr(left_word,left_position,1)=substr(right_word,right_position,1) then
+      left_position := left_position+1;
+      right_position := right_position+1;
+    else
+      differences := differences+1;
+      if differences>1 then return false; end if;
+      if left_length>right_length then
+        left_position := left_position+1;
+      elsif right_length>left_length then
+        right_position := right_position+1;
+      else
+        left_position := left_position+1;
+        right_position := right_position+1;
+      end if;
+    end if;
+  end loop;
+
+  if left_position<=left_length or right_position<=right_length then
+    differences := differences+1;
+  end if;
+  return differences<=1;
+end
+$$;
+
+-- Match the form ISA to the formal-note owner without broad fuzzy matching.
+-- A one-word form value may match the same canonical first name on a full name.
+-- Longer legal names may contain extra middle/surname tokens.  When both values
+-- contain surnames, at least one non-first-name token must match within one edit.
+create or replace function report_api.agent_names_match(p_left text,p_right text)
+returns boolean
+language sql
+immutable
+set search_path = ''
+as $$
+  with cleaned as (
+    select
+      lower(trim(regexp_replace(split_part(coalesce(p_left,''),'@',1),'[^a-zA-Z]+',' ','g'))) left_name,
+      lower(trim(regexp_replace(split_part(coalesce(p_right,''),'@',1),'[^a-zA-Z]+',' ','g'))) right_name
+  ), parts as (
+    select left_name,right_name,
+      report_api.canonical_agent_first_name(left_name) left_first,
+      report_api.canonical_agent_first_name(right_name) right_first,
+      regexp_split_to_array(left_name,' +') left_tokens,
+      regexp_split_to_array(right_name,' +') right_tokens
+    from cleaned
+  ), compared as (
+    select *,cardinality(left_tokens) left_parts,cardinality(right_tokens) right_parts,
+      exists (
+        select 1
+        from unnest(left_tokens[2:cardinality(left_tokens)]) as left_names(left_surname)
+        cross join unnest(right_tokens[2:cardinality(right_tokens)]) as right_names(right_surname)
+        where report_api.agent_name_word_near(left_surname,right_surname)
+      ) shared_name_token
+    from parts
+  )
+  select case
+    when left_name in ('','unknown') or right_name in ('','unknown') then false
+    when report_api.normalize_agent(left_name)=report_api.normalize_agent(right_name) then true
+    when left_first=right_first
+      and (
+        left_parts=1 or right_parts=1 or shared_name_token
+        or (
+          left_first='abraham'
+          and (
+            ('guzman'=any(left_tokens) and 'zavala'=any(right_tokens))
+            or ('zavala'=any(left_tokens) and 'guzman'=any(right_tokens))
+          )
+        )
+      ) then true
+    else false
+  end
+  from compared
+$$;
+
+-- Installation-time guardrails for the name variants that previously created
+-- false review items, plus a negative case that must remain a conflict.
+do $agent_name_match_tests$
+begin
+  if not report_api.agent_names_match('Valerie','Valerie Hernandez')
+    or not report_api.agent_names_match('Patty Diaz','Patricia Diaz')
+    or not report_api.agent_names_match('Angel Domingues','Angel Dominguez')
+    or not report_api.agent_names_match('Francisco Barragan','Francisco Javier Barragan Moran')
+    or not report_api.agent_names_match('Valeri','Valerie Hernandez')
+    or not report_api.agent_names_match('Dieg Nieto','Diego Nieto')
+    or not report_api.agent_names_match('Abraham Guzman','Abraham Zavala')
+    or report_api.agent_names_match('Patricia Smith','Patricia Diaz') then
+    raise exception 'report_api.agent_names_match validation failed';
+  end if;
+end
+$agent_name_match_tests$;
+
 create or replace function report_api.form_isa(p_value text)
 returns text
 language sql
@@ -195,7 +362,7 @@ immutable
 set search_path = ''
 as $$
   select coalesce(
-    nullif(trim(substring(coalesce(p_value,'') from '(?i)ISA[[:space:]]*:[[:space:]]*([A-Za-z][A-Za-z .''-]{1,60}?)[[:space:]]+(?:CURRENT|VENDOR|LOCATION|PROPERTY|PRICE|MOTIVATION|QLT)')),''),
+    nullif(trim(substring(coalesce(p_value,'') from '(?i)ISA[[:space:]]*:[[:space:]]*([A-Za-z][A-Za-z .''-]{1,60}?)[[:space:]]*(?:CURRENT|VENDOR|LOCATION|PROPERTY|PRICE|MOTIVATION|QLT)')),''),
     nullif(trim(substring(coalesce(p_value,'') from '(?i)ISA[[:space:]]*:[[:space:]]*([^\r\n]{2,80})')),'')
   )
 $$;
@@ -208,6 +375,14 @@ set search_path = ''
 as $$
   select report_api.form_isa(coalesce(nullif(trim(p_lead.note),''),nullif(trim(p_lead.all_notes),''),''))
 $$;
+
+do $form_isa_tests$
+begin
+  if report_api.form_isa('Seller Form ISA: Patty DiazCURRENT LIVING STATUS/LOCATION: RentingVENDOR: HomeValue') <> 'Patty Diaz' then
+    raise exception 'report_api.form_isa compact-field validation failed';
+  end if;
+end
+$form_isa_tests$;
 
 create or replace function report_api.form_date(p_value text)
 returns date
@@ -683,11 +858,9 @@ begin
   ), live_checked as materialized (
     select d.*,
       (nullif(d.note_owner_id,'') is not null and d.note_owner_id=d.live_caller_id)
-        or (report_api.normalize_agent(d.note_owner)=report_api.normalize_agent(d.live_caller)
-          and report_api.normalize_agent(d.note_owner) not in ('','unknown')) call_owner_match,
-      (report_api.normalize_agent(d.form_isa)=report_api.normalize_agent(d.note_owner)
-        or report_api.normalize_agent(d.form_isa)=report_api.normalize_agent(split_part(d.note_owner_email,'@',1)))
-        and report_api.normalize_agent(d.form_isa) not in ('','unknown') isa_owner_match
+        or report_api.agent_names_match(d.note_owner,d.live_caller) call_owner_match,
+      (report_api.agent_names_match(d.form_isa,d.note_owner)
+        or report_api.agent_names_match(d.form_isa,split_part(d.note_owner_email,'@',1))) isa_owner_match
     from live_detail d
   ), live_agent_stats as (
     select coalesce(nullif(note_owner_id,''),'email:'||lower(nullif(note_owner_email,'')),'name:'||report_api.normalize_agent(note_owner),'unknown') owner_key,
@@ -705,9 +878,8 @@ begin
     select e.*,
       concat_ws(' ',nullif(trim(rl.first_name),''),nullif(trim(rl.last_name),'')) lead_name,
       rl.lead_status current_lead_status,
-      (report_api.normalize_agent(e.form_isa)=report_api.normalize_agent(e.note_owner)
-        or report_api.normalize_agent(e.form_isa)=report_api.normalize_agent(split_part(e.note_owner_email,'@',1)))
-        and report_api.normalize_agent(e.form_isa) not in ('','unknown') isa_owner_match,
+      (report_api.agent_names_match(e.form_isa,e.note_owner)
+        or report_api.agent_names_match(e.form_isa,split_part(e.note_owner_email,'@',1))) isa_owner_match,
       d.decision manual_decision,d.credited_agent_id manual_agent_id,
       d.credited_agent_name manual_agent_name,d.credited_agent_email manual_agent_email,
       d.reason decision_reason,d.decided_at,d.decided_by
@@ -837,6 +1009,14 @@ begin
       l.created_date_eastern,l.lead_date_eastern,l.first_live_date_eastern,
       l.live_email_sent,l.note latest_saved_note
     from reporting.leads l where l.id=p_lead_id
+  ), review_note_rows as materialized (
+    select ne.* from selected_lead l join reporting.note_events ne on ne.lead_row_id=l.id
+    union all
+    select ne.* from selected_lead l join reporting.note_events ne on ne.lead_row_id is null and ne.phone_key=l.phone_key
+  ), review_call_rows as materialized (
+    select ce.* from selected_lead l join reporting.call_events ce on ce.lead_id=l.id
+    union all
+    select ce.* from selected_lead l join reporting.call_events ce on ce.lead_id is null and ce.phone_key=l.phone_key
   ), notes as (
     select coalesce(jsonb_agg(to_jsonb(n) order by n.note_sequence desc nulls last,n.note_time desc nulls last,n.id desc),'[]'::jsonb) items
     from (
@@ -849,8 +1029,7 @@ begin
         case when trim(coalesce(c.call_type_id,'')) in ('7','10') then 'Inbound'
           else coalesce(nullif(c.call_direction,''),'Outbound') end direction,
         c.call_status,c.recording_status
-      from selected_lead l
-      join reporting.note_events ne on ne.lead_row_id=l.id or (ne.lead_row_id is null and ne.phone_key=l.phone_key)
+      from review_note_rows ne
       left join reporting.call_events c on c.id=ne.matched_call_event_id
       order by ne.note_sequence desc nulls last,coalesce(ne.note_created_at_utc,ne.detected_at_utc) desc nulls last,ne.id desc
       limit 100
@@ -864,8 +1043,7 @@ begin
         case when trim(coalesce(ce.call_type_id,'')) in ('7','10') then 'Inbound'
           else coalesce(nullif(ce.call_direction,''),'Outbound') end direction,
         ce.ai_analysis_status,ce.ai_agent_score,ce.ai_summary
-      from selected_lead l
-      join reporting.call_events ce on ce.lead_id=l.id or (ce.lead_id is null and ce.phone_key=l.phone_key)
+      from review_call_rows ce
       order by ce.call_timestamp desc nulls last,ce.id desc
       limit 50
     ) c
@@ -1141,37 +1319,64 @@ begin
   perform report_api.assert_access();
   if jsonb_typeof(p_rows) <> 'array' then raise exception 'p_rows must be a JSON array.' using errcode='22023'; end if;
   if jsonb_array_length(p_rows) > 500 then raise exception 'CSV batches are limited to 500 rows.' using errcode='22023'; end if;
-  with input as (
-    select * from jsonb_to_recordset(p_rows) as x(row_number integer,first_name text,last_name text,email text,phone text)
+  with input as materialized (
+    select x.row_number,x.first_name,x.last_name,x.email,x.phone,
+      report_api.normalize_phone(x.phone) phone_key,
+      lower(trim(coalesce(x.email,''))) email_key
+    from jsonb_to_recordset(p_rows) as x(row_number integer,first_name text,last_name text,email text,phone text)
+  ), phone_candidates as materialized (
+    select i.row_number,l.id,l.phone_key,l.first_name,l.last_name,l.phone,l.email,l.lead_status,
+      report_api.classified_lead_type(l) lead_type,l.vendor,l.user_name,l.user_id,'PHONE'::text match_method
+    from input i
+    join reporting.leads l on i.phone_key<>'' and l.phone_key=i.phone_key
+  ), email_candidates as materialized (
+    select i.row_number,l.id,l.phone_key,l.first_name,l.last_name,l.phone,l.email,l.lead_status,
+      report_api.classified_lead_type(l) lead_type,l.vendor,l.user_name,l.user_id,'EMAIL'::text match_method
+    from input i
+    join reporting.leads l on i.email_key<>'' and lower(trim(coalesce(l.email,'')))=i.email_key
+    where not exists (select 1 from phone_candidates p where p.row_number=i.row_number)
+  ), candidates as materialized (
+    select * from phone_candidates
+    union all
+    select * from email_candidates
+  ), ranked_candidates as materialized (
+    select c.*,count(*) over (partition by c.row_number) match_count,
+      row_number() over (partition by c.row_number order by c.id desc) candidate_rank
+    from candidates c
+  ), matched_leads as materialized (
+    select * from ranked_candidates where candidate_rank=1
+  ), selected_leads as materialized (
+    select distinct id,phone_key from matched_leads
+  ), call_rows as materialized (
+    select l.id matched_lead_id,c.id,c.call_uuid,c.call_timestamp,c.call_datetime_text
+    from selected_leads l join reporting.call_events c on c.lead_id=l.id
+    union all
+    select l.id matched_lead_id,c.id,c.call_uuid,c.call_timestamp,c.call_datetime_text
+    from selected_leads l join reporting.call_events c on c.lead_id is null and c.phone_key=l.phone_key
+  ), call_aggregates as materialized (
+    select matched_lead_id,count(*)::bigint call_count,
+      count(*) filter (where nullif(trim(coalesce(call_uuid,'')),'') is not null)::bigint recording_count,
+      (array_agg(call_datetime_text order by call_timestamp desc nulls last,id desc))[1] latest_call_at
+    from call_rows group by matched_lead_id
+  ), note_rows as materialized (
+    select l.id matched_lead_id,n.id,n.note_text
+    from selected_leads l join reporting.note_events n on n.lead_row_id=l.id and n.is_new_append is true
+    union all
+    select l.id matched_lead_id,n.id,n.note_text
+    from selected_leads l join reporting.note_events n on n.lead_row_id is null and n.phone_key=l.phone_key and n.is_new_append is true
+  ), note_aggregates as materialized (
+    select matched_lead_id,count(*)::bigint note_count,(array_agg(note_text order by id desc))[1] latest_note
+    from note_rows group by matched_lead_id
   ), matched as (
-    select i.*,m.id,m.first_name matched_first_name,m.last_name matched_last_name,m.phone matched_phone,m.email matched_email,
+    select i.row_number,i.first_name,i.last_name,i.phone,i.email,
+      m.id,m.first_name matched_first_name,m.last_name matched_last_name,m.phone matched_phone,m.email matched_email,
       m.lead_status,m.lead_type,m.vendor,m.user_name,m.user_id,m.match_method,m.match_count,
       coalesce(ca.call_count,0) call_count,coalesce(ca.recording_count,0) recording_count,ca.latest_call_at,
       coalesce(na.note_count,0) note_count,na.latest_note
     from input i
-    left join lateral (
-      select l.*,
-        case when report_api.normalize_phone(i.phone) <> '' and l.phone_key = report_api.normalize_phone(i.phone) then 'PHONE' else 'EMAIL' end match_method,
-        count(*) over () match_count
-      from reporting.leads l
-      where (report_api.normalize_phone(i.phone) <> '' and l.phone_key = report_api.normalize_phone(i.phone))
-         or (nullif(lower(trim(coalesce(i.email,''))),'') is not null and lower(trim(coalesce(l.email,''))) = lower(trim(i.email)))
-      order by (report_api.normalize_phone(i.phone) <> '' and l.phone_key = report_api.normalize_phone(i.phone)) desc,l.id desc
-      limit 1
-    ) m on true
-    left join lateral (
-      select count(*)::bigint call_count,
-        count(*) filter (where nullif(trim(coalesce(c.call_uuid,'')),'') is not null)::bigint recording_count,
-        max(c.call_datetime_text) latest_call_at
-      from reporting.call_events c
-      where m.id is not null and (c.lead_id=m.id or (c.lead_id is null and c.phone_key=m.phone_key))
-    ) ca on true
-    left join lateral (
-      select count(*)::bigint note_count,(array_agg(n.note_text order by n.id desc))[1] latest_note
-      from reporting.note_events n
-      where m.id is not null and n.is_new_append is true
-        and (n.lead_row_id=m.id or (n.lead_row_id is null and n.phone_key=m.phone_key))
-    ) na on true
+    left join matched_leads m on m.row_number=i.row_number
+    left join call_aggregates ca on ca.matched_lead_id=m.id
+    left join note_aggregates na on na.matched_lead_id=m.id
   )
   select coalesce(jsonb_agg(jsonb_build_object(
     'row_number',row_number,'input_first_name',first_name,'input_last_name',last_name,'input_phone',phone,'input_email',email,

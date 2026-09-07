@@ -235,6 +235,17 @@ tbody tr:hover { background: #fafbfd; }
 .decision-history span, .decision-history small { color: #6e8097; }
 .review-modal-footer { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 18px; border-top: 1px solid var(--line); background: var(--surface); }
 .review-navigation, .review-decisions { display: flex; gap: 9px; align-items: center; }
+.decision-dialog-backdrop { z-index: 260; }
+.decision-dialog { width: min(560px,100%); height: auto; max-height: calc(100vh - 36px); }
+.decision-dialog .review-modal-header p { margin: 0; color: var(--muted); }
+.decision-dialog-body { display: grid; gap: 16px; padding: 22px; background: var(--surface-soft); overflow: auto; }
+.decision-dialog-body label { color: var(--muted); font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: .04em; }
+.decision-dialog-body textarea { width: 100%; min-height: 110px; resize: vertical; margin-top: 6px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); color: var(--text); padding: 10px; font: inherit; text-transform: none; letter-spacing: normal; }
+.decision-dialog-body textarea:focus { border-color: #17a98a; box-shadow: 0 0 0 3px rgba(23,169,138,.13); outline: none; }
+.decision-dialog-body small { color: var(--muted); }
+.decision-dialog .review-modal-footer { justify-content: flex-end; }
+.danger-button { color: #a23b34; border-color: #e8aaa4; background: #fff6f4; }
+.lead-review-link.static { cursor: default; }
 .reject-button { border-color: #e5a9a3; color: #a23e37; background: #fff4f2; }
 .geo-source { display: block; margin-top: 4px; color: #7b8da5; font-size: 8px; }
 .export-modal { width: min(760px,100%); height: auto; max-height: min(820px,calc(100vh - 36px)); }
