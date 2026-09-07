@@ -51,8 +51,9 @@ flowchart LR
 12. Run [`supabase/011_large_range_performance.sql`](supabase/011_large_range_performance.sql) during a quiet minute. It adds date, lead, phone, call, and note indexes used by large dashboard ranges and gives the bounded report functions enough execution time to finish.
 13. Run [`supabase/012_live_note_gate_reconciliation.sql`](supabase/012_live_note_gate_reconciliation.sql). It separates Team activity from bonus reconciliation for faster loading, accepts the synchronized note date when the typed form date is stale, and distinguishes a truly missing form from a missing ISA or missing live disposition.
 14. Run [`supabase/013_authoritative_companion_decisions.sql`](supabase/013_authoritative_companion_decisions.sql). It stores audited manager approvals/retractions for the separate companion records whose authoritative creation flags live in the LeadFlow D1 Worker.
-15. In **Authentication → Users**, invite or create the person who should log in.
-16. Authorize that user with this SQL, changing the email:
+15. Run [`supabase/014_field_aware_lead_type.sql`](supabase/014_field_aware_lead_type.sql). It makes the Notes badge and Lead Type filter use completed form answers: Buyer Forms become **Buyer and Seller** only when **HOME TO SELL FIRST?** is affirmative; Seller Forms become **Buyer and Seller** only when their buy-side answers contain real intent. Empty template labels do not count.
+16. In **Authentication → Users**, invite or create the person who should log in.
+17. Authorize that user with this SQL, changing the email:
 
 ```sql
 insert into public.report_users (user_id, display_name, role)
@@ -63,9 +64,9 @@ on conflict (user_id) do update
 set active = true, role = excluded.role;
 ```
 
-17. In **Authentication → URL Configuration**, add the final GitHub Pages URL to the redirect allow list. This is required for emailed sign-in links.
+18. In **Authentication → URL Configuration**, add the final GitHub Pages URL to the redirect allow list. This is required for emailed sign-in links.
 
-For an existing installation that already ran migrations through `011`, run `012` and then `013` before pushing the updated website files. If `011` has not been installed yet, run `011` during a quiet minute, then `012`, then `013`. Selecting a state initially leaves the county and metro gates inactive, which means every lead in that state remains included even if no geography can be resolved. The gate activates only after you uncheck a county or metro.
+For an existing installation that already ran migrations through `013`, run only `014` before pushing the updated website files. If an earlier migration is still missing, run all missing migrations in numeric order through `014`. Selecting a state initially leaves the county and metro gates inactive, which means every lead in that state remains included even if no geography can be resolved. The gate activates only after you uncheck a county or metro.
 
 The secondary fallback never guesses between counties. An exact five-digit ZIP match always wins. If the ZIP is blank or absent from the lookup, `005` tries normalized city + state only when every lookup row for that city points to one county. Ambiguous or unknown cities remain **Unmapped**. The Leads table labels fallback results, and the optional **Geography Match Source** export field records whether each row used ZIP, city/state fallback, or no match.
 

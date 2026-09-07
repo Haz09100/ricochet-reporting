@@ -73,11 +73,34 @@ function mergedNotes(row) {
 
 function displayedLeadType(row, notes = []) {
   if (["Buyer","Seller","Buyer and Seller","Unknown"].includes(String(row?.lead_type || ""))) return row.lead_type;
-  const text = cleanNoteText(row.latest_note || notes[0]?.note_text || row.note_text).toLowerCase();
+  const text = [row.latest_note, row.note_text, ...notes.map((note) => note.note_text)].map(cleanNoteText).filter(Boolean).join("\n").toLowerCase();
   const sellerForm = /(^|[\r\n])\s*seller(?:\s+and\s+buyer)?\s+form(?:\s|:|$)/i.test(text);
   const buyerForm = /(^|[\r\n])\s*buyer(?:\s+and\s+seller)?\s+form(?:\s|:|$)/i.test(text);
-  if (sellerForm && !buyerForm) return "Seller";
-  if (buyerForm && !sellerForm) return "Buyer";
+  const companion = /disposition\s*:\s*companion\s+opportunity/i.test(text) || text.includes("leadflow_split_side");
+  const field = (pattern) => text.match(pattern)?.[1]?.trim() || "";
+  const affirmative = (answer) => /^(yes|true|confirmed)(?:\W|$)/i.test(answer);
+  const meaningful = (answer) => Boolean(answer) && !/^(\[|no(?:\W|$)|none(?:\W|$)|n\/?a(?:\W|$)|not\s+(set|scheduled|yet|known|provided)|unknown)/i.test(answer);
+  if (companion && buyerForm && !sellerForm) return "Buyer";
+  if (companion && sellerForm && !buyerForm) return "Seller";
+  if (buyerForm && sellerForm) return "Buyer and Seller";
+  if (buyerForm) {
+    const homeToSell = field(/home\s+to\s+sell\s+first\s*\?\s*:\s*([^\r\n]{0,160})/i);
+    return affirmative(homeToSell) ? "Buyer and Seller" : "Buyer";
+  }
+  if (sellerForm) {
+    const nextMove = field(/next\s+move\s+after\s+sale\s*\?\s*:\s*([^\r\n]{0,160})/i);
+    const openBuySide = field(/open\s+to\s+speaking\s+with\s+a\s+licensed\s+agent\s+for\s+the\s+buy\s+side\s*:\s*([^\r\n]{0,160})/i);
+    const buyAppointment = field(/set\s+appointment\s+date\s+and\s+time\s+for\s+the\s+buy\s+side\s*:\s*([^\r\n]{0,180})/i);
+    const nextHomeValues = [
+      /next\s+home[^\r\n:]{0,12}city\s*:\s*([^\r\n]{0,100})/i,
+      /next\s+home[^\r\n:]{0,12}state\s*:\s*([^\r\n]{0,80})/i,
+      /next\s+home[^\r\n:]{0,20}zip\s+code\s*:\s*([^\r\n]{0,80})/i,
+      /next\s+home[^\r\n:]{0,20}price\s+range[^\r\n:]{0,12}budget\s*:\s*([^\r\n]{0,120})/i,
+      /next\s+home[^\r\n:]{0,20}timeline\s+to\s+buy\s*:\s*([^\r\n]{0,120})/i,
+    ].map(field);
+    const buySide = /^(buy|purchase)(?:\W|$)/i.test(nextMove) || affirmative(openBuySide) || meaningful(buyAppointment) || nextHomeValues.some(meaningful);
+    return buySide ? "Buyer and Seller" : "Seller";
+  }
   const buyerIntent = /(want|wants|wanted|need|needs|plan|plans|planning|looking|ready|hoping)\s+to\s+(buy|purchase)/i.test(text) || /(buying|purchasing)\s+(another|a|their|his|her)\s+(home|house|property)/i.test(text) || /home to sell first.{0,40}(yes|true)/i.test(text);
   const sellerIntent = /(want|wants|wanted|need|needs|plan|plans|planning|looking|ready|consider|considering)\s+to\s+sell/i.test(text) || text.includes("seller motivation and financials") || text.includes("why selling now:");
   if (buyerIntent && sellerIntent) return "Buyer and Seller";
