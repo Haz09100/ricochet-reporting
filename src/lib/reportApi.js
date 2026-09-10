@@ -75,6 +75,7 @@ export async function loadReportPage(page, filters, pagination = {}, { bypassCac
   const params = reportParameters(filters, withPagination ? {
     page: pagination.page || 1,
     pageSize: pagination.pageSize || 50,
+    ...(page === "leads" ? { filters: { call_min: pagination.callMin ?? "", call_max: pagination.callMax ?? "", call_sort: pagination.callSort || "fewest" } } : {}),
   } : {});
   const cacheKey = JSON.stringify([page, params]);
   const cached = reportCache.get(cacheKey);
@@ -83,7 +84,10 @@ export async function loadReportPage(page, filters, pagination = {}, { bypassCac
   const { data, error } = response;
   if (error) throw new Error(error.message || `Could not load ${page}.`);
   let result = data || {};
-  if (page === "leads") result = await decorateCompanionRows(result);
+  if (page === "leads") {
+    if (result.call_count_scope !== "all_synchronized_history") throw new Error("Install supabase/017_lead_call_coverage.sql in Supabase SQL Editor to enable lead call counts and sorting.");
+    result = await decorateCompanionRows(result);
+  }
   if (page === "team") {
     const [liveBonus,companion,authoritative] = await Promise.all([
       rpcWithRetry("dashboard_live_bonus",reportParameters(filters)),
@@ -285,12 +289,12 @@ export async function loadGeoOptions(state) {
   return data || { state, counties: [], metros: [], mapped_zip_codes: 0 };
 }
 
-export async function loadAllFilteredLeads(filters, selectedFields = [], onProgress) {
+export async function loadAllFilteredLeads(filters, selectedFields = [], onProgress, callOptions = {}) {
   const output = [];
   let page = 1;
   let total = Number.POSITIVE_INFINITY;
   while (output.length < total) {
-    const params = { ...reportParameters(filters, { page, pageSize: 250 }), p_fields: selectedFields };
+    const params = { ...reportParameters(filters, { page, pageSize: 250, filters: { call_min: callOptions.callMin ?? "", call_max: callOptions.callMax ?? "", call_sort: callOptions.callSort || "fewest" } }), p_fields: selectedFields };
     const { data, error } = await rpcWithRetry("dashboard_lead_export",params);
     if (error) throw new Error(error.message || "Could not prepare the full lead export.");
     const rows = Array.isArray(data?.rows) ? data.rows : [];
