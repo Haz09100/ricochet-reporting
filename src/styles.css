@@ -246,6 +246,12 @@ tbody tr:hover { background: #fafbfd; }
 .decision-dialog .review-modal-footer { justify-content: flex-end; }
 .danger-button { color: #a23b34; border-color: #e8aaa4; background: #fff6f4; }
 .lead-review-link.static { cursor: default; }
+.lead-call-controls { display: flex; flex-wrap: wrap; gap: 14px; align-items: end; padding: 14px 18px; border-bottom: 1px solid var(--line); background: var(--surface-soft); }
+.lead-call-controls label { display: grid; gap: 6px; color: var(--muted); font-size: 10px; }
+.lead-call-controls select { min-width: 185px; margin: 0; }
+.lead-call-controls input { width: 115px; margin: 0; }
+.lead-call-controls > span { color: var(--muted); font-size: 10px; margin-bottom: 10px; }
+.lead-call-count { min-width: 46px; font-weight: 800; }
 .delivery-state { display: inline-flex; border-radius: 999px; padding: 4px 8px; background: #edf2f7; color: #60748a; font-size: 8px; font-weight: 800; text-transform: capitalize; white-space: nowrap; }
 .delivery-state.delivered { background: #e4f7f1; color: #08705e; }
 .delivery-state.pending { background: #fff2c8; color: #8a5b00; }
