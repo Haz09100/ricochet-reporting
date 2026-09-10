@@ -18,13 +18,13 @@ import {
   Users,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import LoginPage from "./components/LoginPage.jsx";
 import { ViewRouter } from "./components/ReportViews.jsx";
 import { config, supabaseConfigured } from "./config.js";
 import { demoForPage } from "./demo.js";
 import { useAutoRefresh } from "./hooks/useAutoRefresh.js";
-import { loadFilterOptions, loadGeoOptions, loadReportPage } from "./lib/reportApi.js";
+import { clearReportCaches, loadFilterOptions, loadGeoOptions, loadReportPage } from "./lib/reportApi.js";
 import { supabase } from "./lib/supabase.js";
 
 const navigation = [
@@ -161,6 +161,7 @@ export default function App() {
   const [error, setError] = useState("");
   const [lastUpdated, setLastUpdated] = useState(null);
   const [toast, setToastState] = useState(null);
+  const activeRequest = useRef(null);
 
   const setPage = (next) => {
     setPageState(next); setSidebarOpen(false); setPagination({ page: 1, pageSize: 50 }); setData(null); setError("");
@@ -175,7 +176,10 @@ export default function App() {
   useEffect(() => {
     if (!supabase) return undefined;
     supabase.auth.getSession().then(({ data: auth }) => { setSession(auth.session); setAuthReady(true); });
-    const { data: listener } = supabase.auth.onAuthStateChange((_event, nextSession) => { setSession(nextSession); setAuthReady(true); });
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      if (["SIGNED_IN", "SIGNED_OUT", "USER_UPDATED"].includes(_event)) clearReportCaches();
+      setSession(nextSession); setAuthReady(true);
+    });
     return () => listener.subscription.unsubscribe();
   }, []);
 
@@ -194,19 +198,34 @@ export default function App() {
 
   const load = useCallback(async ({ background = false, force = false } = {}) => {
     if (["csv", "settings"].includes(page)) return;
+    if (background && !force && activeRequest.current) return;
+    activeRequest.current?.abort();
+    const controller = new AbortController();
+    activeRequest.current = controller;
     if (!background) { setLoading(true); setData(null); }
     setError("");
     try {
-      const next = preview ? demoForPage(page) : await loadReportPage(page, filters, pagination, { bypassCache: background || force });
-      setData(next); setLastUpdated(new Date());
-    } catch (cause) { setError(cause.message); if (background) setToast(cause.message, true); }
-    finally { if (!background) setLoading(false); }
+      const next = preview ? demoForPage(page) : await loadReportPage(page, filters, pagination, { bypassCache: background || force, signal: controller.signal });
+      if (controller.signal.aborted || activeRequest.current !== controller) return;
+      setData(next); setLastUpdated(new Date(next.generated_at || Date.now()));
+    } catch (cause) {
+      if (!controller.signal.aborted && activeRequest.current === controller) { controller.abort(); setError(cause.message); if (background) setToast(cause.message, true); }
+    } finally {
+      if (activeRequest.current === controller) { activeRequest.current = null; setLoading(false); }
+    }
   }, [filters, page, pagination, preview, setToast]);
 
-  useEffect(() => { if (preview || session) load(); }, [load, preview, session]);
+  useEffect(() => {
+    if (preview || session) load();
+    return () => { activeRequest.current?.abort(); activeRequest.current = null; };
+  }, [load, preview, session]);
   useEffect(() => {
     if (preview || !session) return;
-    loadFilterOptions(filters.from, filters.to).then((next) => setOptions({ ...defaultOptions, ...next })).catch(() => {});
+    const controller = new AbortController();
+    loadFilterOptions(filters.from, filters.to, { signal: controller.signal }).then((next) => {
+      if (!controller.signal.aborted) setOptions({ ...defaultOptions, ...next });
+    }).catch(() => {});
+    return () => controller.abort();
   }, [filters.from, filters.to, preview, session]);
   useEffect(() => {
     const state = draftFilters.state;
