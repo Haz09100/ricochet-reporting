@@ -10,28 +10,53 @@ const rpcNames = Object.freeze({
   teacher: "dashboard_ai_review",
 });
 const reportCache = new Map();
+const rpcCache = new Map();
+let cacheGeneration = 0;
+export function clearReportCaches() {
+  cacheGeneration += 1;
+  reportCache.clear();
+  rpcCache.clear();
+}
 const CACHE_MS = 60_000;
 const wait = (milliseconds) => new Promise((resolve) => window.setTimeout(resolve, milliseconds));
-const transientReportError = (error) => /statement timeout|canceling statement|timed out|timeout|fetch failed|failed to fetch|network|connection reset|502|503|504/i.test(error?.message || "");
+const transientReportError = (error) => !/statement timeout|canceling statement|57014|abort/i.test(error?.message || "") && /fetch failed|failed to fetch|network|connection reset|502|503|504/i.test(error?.message || "");
 const compactText = (input) => String(input || "").replace(/\s+/g, " ").trim();
 const comparable = (input) => compactText(input).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 
-async function rpcWithRetry(name, params, maximumAttempts = 4) {
+async function rpcWithRetry(name, params, maximumAttempts = 2, { signal } = {}) {
   let response;
   let thrown;
   const delays = [1000,2500,5000];
   for (let attempt = 0; attempt < maximumAttempts; attempt += 1) {
     try {
-      response = await requiredClient().rpc(name, params);
+      signal?.throwIfAborted();
+      const query = requiredClient().rpc(name, params);
+      response = await (signal ? query.abortSignal(signal) : query);
+      signal?.throwIfAborted();
       thrown = null;
       if (!response.error || !transientReportError(response.error) || attempt === maximumAttempts - 1) return response;
     } catch (error) {
+      if (signal?.aborted) throw error;
       thrown = error;
       if (!transientReportError(error) || attempt === maximumAttempts - 1) throw error;
     }
     await wait(delays[Math.min(attempt,delays.length - 1)]);
   }
   if (thrown) throw thrown;
+  return response;
+}
+
+async function readReportRpc(name, params, { signal, bypassCache = false } = {}) {
+  signal?.throwIfAborted();
+  const key = JSON.stringify([name, params]);
+  const cached = rpcCache.get(key);
+  if (!bypassCache && cached && Date.now() - cached.savedAt < CACHE_MS) return cached.response;
+  const generation = cacheGeneration;
+  const response = await rpcWithRetry(name, params, 2, { signal });
+  if (!response.error && generation === cacheGeneration && !signal?.aborted) {
+    if (rpcCache.size >= 24) rpcCache.delete(rpcCache.keys().next().value);
+    rpcCache.set(key, { response, savedAt: Date.now() });
+  }
   return response;
 }
 
@@ -69,7 +94,10 @@ export function reportParameters(filters, extra = {}) {
   };
 }
 
-export async function loadReportPage(page, filters, pagination = {}, { bypassCache = false } = {}) {
+export async function loadReportPage(page, filters, pagination = {}, { bypassCache = false, signal } = {}) {
+  signal?.throwIfAborted();
+  const generation = cacheGeneration;
+  const read = (rpcName, rpcParams) => readReportRpc(rpcName, rpcParams, { signal, bypassCache }).catch((error) => ({ data: null, error }));
   const name = rpcNames[page] || rpcNames.overview;
   const withPagination = ["calls", "notes", "leads", "teacher"].includes(page);
   const params = reportParameters(filters, withPagination ? {
@@ -80,20 +108,37 @@ export async function loadReportPage(page, filters, pagination = {}, { bypassCac
   const cacheKey = JSON.stringify([page, params]);
   const cached = reportCache.get(cacheKey);
   if (!bypassCache && cached && Date.now() - cached.savedAt < CACHE_MS) return cached.data;
-  const response = await rpcWithRetry(name,params);
+  // Start independent sections together. All promises settle safely even if
+  // the main request fails or the user changes filters.
+  const core = read(name, params);
+  const extraParams = reportParameters(filters);
+  const extras = page === "overview"
+    ? Promise.all([read("dashboard_first_response_metrics", extraParams),
+      read("dashboard_live_bonus_count", extraParams).then((response) => {
+        // Older databases remain compatible until migration 018 is installed.
+        if (response.error && /PGRST202|42883|could not find the function/i.test(`${response.error.code || ''} ${response.error.message || ''}`)) {
+          return read("dashboard_live_bonus", extraParams);
+        }
+        return response;
+      })])
+    : page === "team"
+      ? Promise.all([
+        read("dashboard_live_bonus", extraParams),
+        read("dashboard_companion_bonus", extraParams),
+        loadAuthoritativeCompanionBonus(filters, {}, { signal, bypassCache }).then((data) => ({ data, error: null })).catch((error) => ({ data: null, error })),
+      ]) : null;
+  const response = await core;
+  signal?.throwIfAborted();
   const { data, error } = response;
   if (error) throw new Error(error.message || `Could not load ${page}.`);
   let result = data || {};
   if (page === "leads") {
     if (result.call_count_scope !== "all_synchronized_history") throw new Error("Install supabase/017_lead_call_coverage.sql in Supabase SQL Editor to enable lead call counts and sorting.");
-    result = await decorateCompanionRows(result);
+    result = await decorateCompanionRows(result, "id", { signal, bypassCache });
   }
   if (page === "team") {
-    const [liveBonus,companion,authoritative] = await Promise.all([
-      rpcWithRetry("dashboard_live_bonus",reportParameters(filters)),
-      rpcWithRetry("dashboard_companion_bonus",reportParameters(filters)),
-      loadAuthoritativeCompanionBonus(filters, {}).then((data) => ({ data, error: null })).catch((error) => ({ data: null, error })),
-    ]);
+    const [liveBonus,companion,authoritative] = await extras;
+    signal?.throwIfAborted();
     if (liveBonus.error) throw new Error(liveBonus.error.message || "Could not load the live-lead bonus ledger.");
     if (companion.error) throw new Error(companion.error.message || "Could not load companion lead bonuses.");
     const fallbackCompanion = companion.data || {};
@@ -107,10 +152,8 @@ export async function loadReportPage(page, filters, pagination = {}, { bypassCac
     result = { ...result, ...(liveBonus.data || {}), companion_bonus: companionBonus };
   }
   if (page === "overview") {
-    const [firstResponse, teamResponse] = await Promise.all([
-      rpcWithRetry("dashboard_first_response_metrics",reportParameters(filters)),
-      rpcWithRetry("dashboard_live_bonus",reportParameters(filters)),
-    ]);
+    const [firstResponse, teamResponse] = await extras;
+    signal?.throwIfAborted();
     const auditedLiveTotal = teamResponse.error
       ? null
       : Number(teamResponse.data?.live_bonus_totals?.sent_live_leads);
@@ -128,7 +171,11 @@ export async function loadReportPage(page, filters, pagination = {}, { bypassCac
         : { ...(firstResponse.data || {}), available: true },
     };
   }
-  reportCache.set(cacheKey, { data: result, savedAt: Date.now() });
+  signal?.throwIfAborted();
+  if (generation === cacheGeneration) {
+    if (reportCache.size >= 16) reportCache.delete(reportCache.keys().next().value);
+    reportCache.set(cacheKey, { data: result, savedAt: Date.now() });
+  }
   return result;
 }
 
@@ -261,23 +308,23 @@ function buildAuthoritativeCompanionBonus(sourceRows, decisions, fallback) {
   };
 }
 
-async function loadAuthoritativeCompanionBonus(filters, fallback) {
+async function loadAuthoritativeCompanionBonus(filters, fallback, options = {}) {
   const query = new URLSearchParams({ from: filters.from, to: filters.to });
-  const response = await bridgeRequest(`/companion-leads?${query}`);
+  const response = await bridgeRequest(`/companion-leads?${query}`, { signal: options.signal });
   const payload = await response.json();
   const sourceRows = (Array.isArray(payload.rows) ? payload.rows : []).filter((row) => sourceCompanionMatches(row,filters));
   const sourceIds = sourceRows.map((row) => String(row.sourceLeadId || "")).filter(Boolean);
   const decisions = [];
   for (let index = 0; index < sourceIds.length; index += 500) {
-    const { data, error } = await rpcWithRetry("dashboard_companion_source_decisions", { p_source_lead_ids: sourceIds.slice(index,index + 500) });
+    const { data, error } = await readReportRpc("dashboard_companion_source_decisions", { p_source_lead_ids: sourceIds.slice(index,index + 500) }, options);
     if (error) throw new Error(error.message || "Could not load companion bonus decisions.");
     decisions.push(...(Array.isArray(data) ? data : []));
   }
   return buildAuthoritativeCompanionBonus(sourceRows,decisions,fallback);
 }
 
-export async function loadFilterOptions(from, to) {
-  const { data, error } = await requiredClient().rpc("dashboard_filter_options", { p_from: from, p_to: to });
+export async function loadFilterOptions(from, to, options = {}) {
+  const { data, error } = await readReportRpc("dashboard_filter_options", { p_from: from, p_to: to }, options);
   if (error) throw new Error(error.message || "Could not load filter choices.");
   return data || {};
 }
@@ -317,11 +364,11 @@ export async function matchCsvRows(rows) {
   return (await decorateCompanionRows({ rows: matched }, "lead_id")).rows;
 }
 
-async function decorateCompanionRows(result, idField = "id") {
+async function decorateCompanionRows(result, idField = "id", options = {}) {
   const rows = Array.isArray(result?.rows) ? result.rows : [];
-  const ids = [...new Set(rows.map((row) => Number(row?.[idField] || 0)).filter(Boolean))];
+  const ids = [...new Set(rows.filter((row) => !row.creation_origin).map((row) => Number(row?.[idField] || 0)).filter(Boolean))];
   if (!ids.length) return { ...(result || {}), rows };
-  const { data, error } = await rpcWithRetry("dashboard_companion_origins",{ p_lead_ids: ids });
+  const { data, error } = await readReportRpc("dashboard_companion_origins",{ p_lead_ids: ids }, options);
   if (error) throw new Error(error.message || "Could not identify companion leads.");
   const byId = new Map((Array.isArray(data) ? data : []).map((item) => [Number(item.id), item]));
   return { ...(result || {}), rows: rows.map((row) => ({ ...row, ...(byId.get(Number(row?.[idField])) || {}) })) };
@@ -368,7 +415,7 @@ export async function setLiveBonusDecision({ leadId, decision, agentId = "", age
     p_reason: reason,
   });
   if (error) throw new Error(error.message || "Could not save the bonus decision.");
-  reportCache.clear();
+  clearReportCaches();
   return data || {};
 }
 
@@ -383,14 +430,14 @@ export async function setCompanionBonusDecision({ leadId, sourceLeadId = "", des
       p_source_snapshot: sourceSnapshot || {},
     });
     if (error) throw new Error(error.message || "Could not save the LeadFlow companion bonus decision.");
-    reportCache.clear();
+    clearReportCaches();
     return data || {};
   }
   const { data, error } = await requiredClient().rpc("dashboard_set_companion_bonus_decision", {
     p_lead_id: Number(leadId), p_decision: decision, p_agent_name: agentName || null, p_reason: reason,
   });
   if (error) throw new Error(error.message || "Could not save the companion bonus decision.");
-  reportCache.clear();
+  clearReportCaches();
   return data || {};
 }
 
@@ -415,6 +462,7 @@ export async function bridgeRequest(path, options = {}) {
     try {
       response = await fetch(`${config.workerUrl}${path}`, { ...options, headers });
     } catch (error) {
+      if (options.signal?.aborted) throw error;
       if (attempt < attempts) { await new Promise((resolve) => setTimeout(resolve, 350 * attempt)); continue; }
       throw new Error(`Could not reach the private report bridge at ${config.workerUrl}. Check the GitHub WORKER_BASE_URL and the bridge ALLOWED_ORIGINS setting.`);
     }
@@ -431,5 +479,7 @@ export async function bridgeRequest(path, options = {}) {
 
 export async function runAiAction(path, payload) {
   const response = await bridgeRequest(path, { method: "POST", body: JSON.stringify(payload || {}) });
-  return response.json();
+  const result = await response.json();
+  clearReportCaches();
+  return result;
 }
