@@ -719,7 +719,7 @@ const leadExportFields = [
   { key: "latest_note_owner", label: "Latest Note Owner", value: (row) => row.latest_note_owner || "" },
   { key: "latest_note", label: "Latest Note", value: (row) => row.latest_note || "" },
   { key: "all_notes", label: "All Notes (up to 100)", value: (row) => row.all_notes || "" },
-  { key: "call_count", label: "Call Count", value: (row) => row.call_count || 0 },
+  { key: "call_count", label: "Total Calls (All History)", defaultSelected: true, value: (row) => row.call_count ?? "" },
   { key: "latest_call_date", label: "Latest Call Date", value: (row) => row.latest_call_date || "" },
   { key: "latest_call_owner", label: "Latest Call Owner", value: (row) => row.latest_call_owner || "" },
   { key: "latest_call_direction", label: "Latest Call Direction", value: (row) => row.latest_call_direction || "" },
@@ -752,14 +752,20 @@ function LeadExportDialog({ selectedFields, setSelectedFields, exporting, export
   </section></div>;
 }
 
-export function LeadsView({ data, filters, page, setPage, setToast }) {
+export function LeadsView({ data, filters, page, setPage, setToast, callOptions = {}, setCallOptions }) {
   const rows = data?.rows || [];
+  const [callMin, setCallMin] = useState(callOptions.callMin ?? "");
+  const [callMax, setCallMax] = useState(callOptions.callMax ?? "");
+  useEffect(() => {
+    setCallMin(callOptions.callMin ?? "");
+    setCallMax(callOptions.callMax ?? "");
+  }, [callOptions.callMin, callOptions.callMax]);
   const leadColumns = {
     lead: { value: (row) => fullName(row) }, status: { value: "lead_status" }, type: { value: "lead_type" }, origin: { value: "creation_label" }, vendor: { value: "vendor" }, agent: { value: "user_name" },
     address: { value: (row) => [row.address,row.address_2,row.city,row.property_state,row.property_zip].filter(Boolean).join(" ") }, county: { value: "county" }, metro: { value: "metro" },
     activity: { value: "lead_date", type: "date" }, created: { value: (row) => row.created_at || row.created_date, type: "date" },
   };
-  const sorted = useTableSort(rows, leadColumns, "activity", "desc");
+  const sorted = useTableSort(rows, leadColumns);
   const [selectedLeadId, setSelectedLeadId] = useState(null);
   const [showExportDialog, setShowExportDialog] = useState(false);
   const [selectedExportFields, setSelectedExportFields] = useState(defaultLeadExportFields);
@@ -768,15 +774,27 @@ export function LeadsView({ data, filters, page, setPage, setToast }) {
   const exportAll = async () => {
     setExporting(true); setExportProgress("Preparing…");
     try {
-      const output = await loadAllFilteredLeads(filters, selectedExportFields, (loaded, total) => setExportProgress(`${number(loaded)} of ${number(total)}`));
+      const output = await loadAllFilteredLeads(filters, selectedExportFields, (loaded, total) => setExportProgress(`${number(loaded)} of ${number(total)}`), callOptions);
       downloadCsv("ricochet-all-filtered-leads.csv", output.map((row) => leadExportRow(row, selectedExportFields)));
-      setToast(`${number(output.length)} filtered leads exported with county and metro.`);
+      setToast(`${number(output.length)} leads exported using the selected call filter and order.`);
       setShowExportDialog(false);
     } catch (cause) { setToast(cause.message, true); }
     finally { setExporting(false); setExportProgress(""); }
   };
   const openExport = () => { setSelectedExportFields(defaultLeadExportFields); setShowExportDialog(true); };
-  return <><article className="panel report-panel"><div className="panel-heading"><div><span className="eyebrow">Lead directory</span><h3>Leads in the selected cohort</h3><p>Click any lead to view its complete notes, call owners, recordings, and timeline. Generated buyer/seller companions are labeled and can be isolated with the Lead origin filter.</p></div><button className="button secondary" disabled={exporting || !Number(data?.total || 0)} onClick={openExport}><Download size={15} />Export all filtered</button></div>{!rows.length ? <Empty message="No leads matched these filters." /> : <div className="table-wrap"><table><thead><tr><SortHeader id="lead" label="Lead" sort={sorted.sort} onSort={sorted.requestSort} /><SortHeader id="status" label="Status" sort={sorted.sort} onSort={sorted.requestSort} /><SortHeader id="type" label="Type" sort={sorted.sort} onSort={sorted.requestSort} /><SortHeader id="origin" label="Lead origin" sort={sorted.sort} onSort={sorted.requestSort} /><SortHeader id="vendor" label="Vendor" sort={sorted.sort} onSort={sorted.requestSort} /><SortHeader id="agent" label="Assigned agent" sort={sorted.sort} onSort={sorted.requestSort} /><SortHeader id="address" label="Address" sort={sorted.sort} onSort={sorted.requestSort} /><SortHeader id="county" label="County" sort={sorted.sort} onSort={sorted.requestSort} /><SortHeader id="metro" label="Metro area" sort={sorted.sort} onSort={sorted.requestSort} /><SortHeader id="activity" label="Activity date" sort={sorted.sort} onSort={sorted.requestSort} /><SortHeader id="created" label="Created date" sort={sorted.sort} onSort={sorted.requestSort} /></tr></thead><tbody>{sorted.rows.map((row) => <tr key={row.id}><td><button className="lead-review-link" onClick={() => setSelectedLeadId(row.id)}><strong>{fullName(row)}</strong><small>{row.phone || ""}{row.email ? ` · ${row.email}` : ""} · Open full record</small></button></td><td><span className="tag">{value(row, "lead_status")}</span></td><td>{value(row, "lead_type")}</td><td><span className={`tag${row.creation_origin === "original" ? " quiet" : ""}`}>{row.creation_label || "Original / not companion"}</span>{row.creation_origin !== "original" && <small>ISA: {value(row,"originating_agent")}</small>}</td><td>{value(row, "vendor")}</td><td>{value(row, "user_name")}</td><td>{[row.address, row.address_2, row.city, row.property_state, row.property_zip].filter(Boolean).join(", ") || "—"}</td><td>{row.county ? <><span>{row.county}</span><small className="geo-source">{row.geo_match_method === "city_state_unique_county" ? "City/state fallback" : "ZIP match"}</small></> : "Unmapped"}</td><td>{row.metro || (row.geo_match_method === "city_state_unique_county" ? "Not uniquely mapped" : "Unmapped")}</td><td>{value(row, "lead_date")}</td><td>{value(row, "created_date")}</td></tr>)}</tbody></table></div>}<Pager data={data} page={page} setPage={setPage} /></article>{selectedLeadId && <LeadReviewPopup rows={sorted.rows} selectedLeadId={selectedLeadId} setSelectedLeadId={setSelectedLeadId} />}{showExportDialog && <LeadExportDialog selectedFields={selectedExportFields} setSelectedFields={setSelectedExportFields} exporting={exporting} exportProgress={exportProgress} onClose={() => setShowExportDialog(false)} onExport={exportAll} />}</>;
+  return <><article className="panel report-panel"><div className="panel-heading"><div><span className="eyebrow">Lead directory</span><h3>Leads in the selected cohort</h3><p>Click any lead to view its complete notes, call owners, recordings, and timeline. Total calls includes all synchronized call attempts, including unanswered calls. Dates select the lead cohort; call counts cover its full history.</p></div><button className="button secondary" disabled={exporting || !Number(data?.total || 0)} onClick={openExport}><Download size={15} />Export all filtered</button></div>
+    <form className="lead-call-controls" onSubmit={(event) => { event.preventDefault(); setCallOptions({ ...callOptions, callMin, callMax }); }}>
+      <label>Minimum calls<input type="number" min="0" max="1000000000" step="1" placeholder="Any" value={callMin} onChange={(event) => setCallMin(event.target.value)} /></label>
+      <label>Maximum calls<input type="number" min={callMin === "" ? "0" : callMin} max="1000000000" step="1" placeholder="Any" value={callMax} onChange={(event) => setCallMax(event.target.value)} /></label>
+      <button className="button secondary" type="submit">Apply call filter</button>
+      <button className="button secondary" type="button" onClick={() => setCallOptions({ ...callOptions, callMin: "0", callMax: "0" })}>No calls</button>
+      <button className="button secondary" type="button" onClick={() => { setCallMin(""); setCallMax(""); setCallOptions({ ...callOptions, callMin: "", callMax: "" }); }}>All call counts</button>
+      <label>Order across all matching leads<select value={callOptions.callSort || "fewest"} onChange={(event) => setCallOptions({ ...callOptions, callSort: event.target.value })}>
+        <option value="fewest">Fewest calls first</option><option value="most">Most calls first</option><option value="recent">Most recent activity</option>
+      </select></label>
+      <span>{number(data?.total)} matching leads · Exact count on every row. For exactly 12 calls, enter 12 in both boxes.</span>
+    </form>
+    {!rows.length ? <Empty message="No leads matched these filters." /> : <div className="table-wrap"><table><thead><tr><SortHeader id="lead" label="Lead" sort={sorted.sort} onSort={sorted.requestSort} /><th>Total calls<br /><small>All history</small></th><th>Last call</th><SortHeader id="status" label="Status" sort={sorted.sort} onSort={sorted.requestSort} /><SortHeader id="type" label="Type" sort={sorted.sort} onSort={sorted.requestSort} /><SortHeader id="origin" label="Lead origin" sort={sorted.sort} onSort={sorted.requestSort} /><SortHeader id="vendor" label="Vendor" sort={sorted.sort} onSort={sorted.requestSort} /><SortHeader id="agent" label="Assigned agent" sort={sorted.sort} onSort={sorted.requestSort} /><SortHeader id="address" label="Address" sort={sorted.sort} onSort={sorted.requestSort} /><SortHeader id="county" label="County" sort={sorted.sort} onSort={sorted.requestSort} /><SortHeader id="metro" label="Metro area" sort={sorted.sort} onSort={sorted.requestSort} /><SortHeader id="activity" label="Activity date" sort={sorted.sort} onSort={sorted.requestSort} /><SortHeader id="created" label="Created date" sort={sorted.sort} onSort={sorted.requestSort} /></tr></thead><tbody>{sorted.rows.map((row) => <tr key={row.id}><td><button className="lead-review-link" onClick={() => setSelectedLeadId(row.id)}><strong>{fullName(row)}</strong><small>{row.phone || ""}{row.email ? ` · ${row.email}` : ""} · Open full record</small></button></td><td><button className="button secondary lead-call-count" onClick={() => setSelectedLeadId(row.id)} aria-label={`View calls for ${fullName(row)}`}>{row.call_count == null ? "Unavailable" : number(row.call_count)}</button></td><td>{row.last_call_at ? formatNoteTime(row.last_call_at) : row.call_count === 0 ? "No calls" : "Time unavailable"}</td><td><span className="tag">{value(row, "lead_status")}</span></td><td>{value(row, "lead_type")}</td><td><span className={`tag${row.creation_origin === "original" ? " quiet" : ""}`}>{row.creation_label || "Original / not companion"}</span>{row.creation_origin !== "original" && <small>ISA: {value(row,"originating_agent")}</small>}</td><td>{value(row, "vendor")}</td><td>{value(row, "user_name")}</td><td>{[row.address, row.address_2, row.city, row.property_state, row.property_zip].filter(Boolean).join(", ") || "—"}</td><td>{row.county ? <><span>{row.county}</span><small className="geo-source">{row.geo_match_method === "city_state_unique_county" ? "City/state fallback" : "ZIP match"}</small></> : "Unmapped"}</td><td>{row.metro || (row.geo_match_method === "city_state_unique_county" ? "Not uniquely mapped" : "Unmapped")}</td><td>{value(row, "lead_date")}</td><td>{value(row, "created_date")}</td></tr>)}</tbody></table></div>}<Pager data={data} page={page} setPage={setPage} /></article>{selectedLeadId && <LeadReviewPopup rows={sorted.rows} selectedLeadId={selectedLeadId} setSelectedLeadId={setSelectedLeadId} />}{showExportDialog && <LeadExportDialog selectedFields={selectedExportFields} setSelectedFields={setSelectedExportFields} exporting={exporting} exportProgress={exportProgress} onClose={() => setShowExportDialog(false)} onExport={exportAll} />}</>;
 }
 
 export function CsvView({ setToast }) {
@@ -857,7 +875,7 @@ export function ViewRouter({ page, data, filters, pagination, setPagination, set
   if (page === "team") return <TeamView data={data} setToast={setToast} onDataChanged={onDataChanged} />;
   if (page === "calls") return <CallsView data={data} filters={filters} page={pagination.page} setPage={(pageNumber) => setPagination({ ...pagination, page: pageNumber })} setToast={setToast} onDataChanged={onDataChanged} />;
   if (page === "notes") return <NotesView data={data} filters={filters} page={pagination.page} setPage={(pageNumber) => setPagination({ ...pagination, page: pageNumber })} setToast={setToast} onDataChanged={onDataChanged} />;
-  if (page === "leads") return <LeadsView data={data} filters={filters} page={pagination.page} setPage={(pageNumber) => setPagination({ ...pagination, page: pageNumber })} setToast={setToast} />;
+  if (page === "leads") return <LeadsView data={data} filters={filters} page={pagination.page} setPage={(pageNumber) => setPagination({ ...pagination, page: pageNumber })} setToast={setToast} callOptions={pagination} setCallOptions={(options) => setPagination({ ...pagination, ...options, page: 1 })} />;
   if (page === "csv") return <CsvView setToast={setToast} />;
   if (page === "teacher") return <TeacherView data={data} page={pagination.page} setPage={(pageNumber) => setPagination({ ...pagination, page: pageNumber })} setToast={setToast} />;
   return <OverviewView data={data} />;
